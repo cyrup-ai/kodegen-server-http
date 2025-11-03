@@ -50,7 +50,7 @@ where
 ///
 /// Example usage in category server main.rs:
 /// ```
-/// use kodegen_mcp_server_http::{run_http_server, RouterSet, Managers, register_tool};
+/// use kodegen_server_http::{run_http_server, RouterSet, Managers, register_tool};
 /// use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 ///
 /// #[tokio::main]

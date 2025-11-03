@@ -1,0 +1,57 @@
+[package]
+name = "kodegen_server_http"
+version = "0.1.0"
+edition = "2024"
+description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
+license = "Apache-2.0 OR MIT"
+authors = ["KODEGEN.ᴀɪ"]
+homepage = "https://kodegen.ai"
+repository = "https://github.com/cyrup-ai/kodegen-server-http"
+readme = "README.md"
+categories = ["development-tools","api-bindings"]
+keywords = [
+    "mcp",
+    "client",
+    "agent",
+    "claude"
+]
+
+[dependencies]
+# Internal dependencies
+kodegen_tools_config = { version = "0.1" }
+kodegen_utils = { version = "0.1" }
+kodegen_mcp_tool = { version = "0.1" }
+
+# MCP SDK with Streamable HTTP feature (NOT sse-server!)
+rmcp = { version = "0.8", features = ["server", "transport-streamable-http-server"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+
+# HTTP stack
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Error handling
+anyhow = "1"
+
+# Logging
+env_logger = "0.11"
+log = "0.4"
+chrono = "0.4"
+
+# TLS
+rustls = "0.23"
+
+# Serialization
+serde = "1"
+serde_json = "1"
+
+# Async utilities for parallel manager shutdown
+futures = "0.3"

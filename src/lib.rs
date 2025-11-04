@@ -82,7 +82,13 @@ where
     env_logger::init();
 
     // Install rustls CryptoProvider (required for HTTPS)
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // This is idempotent: if a provider is already installed (e.g., by a parent
+    // application), we log and continue rather than failing.
+    if let Err(_existing_provider) = rustls::crypto::ring::default_provider().install_default() {
+        log::debug!(
+            "rustls crypto provider already installed (likely by parent application or test harness)"
+        );
+    }
 
     // Parse CLI arguments
     let cli = Cli::parse();

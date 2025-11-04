@@ -131,26 +131,20 @@ impl HttpServer {
             ct_clone.cancelled().await;
             log::debug!("Cancellation triggered, initiating graceful shutdown");
 
-            // Start manager shutdown concurrently with HTTP shutdown
-            // 2-second delay allows in-flight HTTP requests to complete before manager cleanup
-            let managers_shutdown = {
-                let managers = managers.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(2000)).await;
-                    log::debug!("Starting manager shutdown");
-                    if let Err(e) = managers.shutdown().await {
-                        log::error!("Failed to shutdown managers: {e}");
-                    }
-                })
-            };
-
             // Trigger HTTP shutdown with 20-second timeout
             shutdown_handle.graceful_shutdown(Some(Duration::from_secs(20)));
-            let _ = server_task.await;
-            log::debug!("HTTP server shutdown complete");
 
-            // Wait for managers to finish cleanup
-            let _ = managers_shutdown.await;
+            // Wait for HTTP server to complete shutdown
+            match server_task.await {
+                Ok(_) => log::debug!("HTTP server shutdown complete"),
+                Err(e) => log::error!("HTTP server task panicked: {:?}", e),
+            }
+
+            // Now shut down managers (safe - HTTP no longer using them)
+            log::debug!("Starting manager shutdown");
+            if let Err(e) = managers.shutdown().await {
+                log::error!("Failed to shutdown managers: {e}");
+            }
             log::debug!("Manager shutdown complete");
 
             let _ = completion_tx.send(());

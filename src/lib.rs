@@ -131,7 +131,9 @@ where
         addr
     );
 
-    let handle = server.serve_with_tls(addr, cli.tls_config()).await?;
+    // Get shutdown timeout configuration
+    let timeout = cli.shutdown_timeout();
+    let handle = server.serve_with_tls(addr, cli.tls_config(), timeout).await?;
 
     log::info!("{} server running on {}://{}", category, protocol, addr);
     if cli.tls_config().is_some() {
@@ -143,7 +145,6 @@ where
     wait_for_shutdown_signal().await?;
 
     // Graceful shutdown
-    let timeout = cli.shutdown_timeout();
     log::info!(
         "Shutdown signal received, initiating graceful shutdown (timeout: {:?})",
         timeout

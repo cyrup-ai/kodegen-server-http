@@ -53,6 +53,7 @@ impl HttpServer {
         self,
         addr: SocketAddr,
         tls_config: Option<(PathBuf, PathBuf)>,
+        shutdown_timeout: Duration,
     ) -> Result<ServerHandle> {
         use tokio::sync::oneshot;
         use tokio_util::sync::CancellationToken;
@@ -131,8 +132,8 @@ impl HttpServer {
             ct_clone.cancelled().await;
             log::debug!("Cancellation triggered, initiating graceful shutdown");
 
-            // Trigger HTTP shutdown with 20-second timeout
-            shutdown_handle.graceful_shutdown(Some(Duration::from_secs(20)));
+            // Trigger HTTP shutdown with user-configured timeout
+            shutdown_handle.graceful_shutdown(Some(shutdown_timeout));
 
             // Wait for HTTP server to complete shutdown
             match server_task.await {

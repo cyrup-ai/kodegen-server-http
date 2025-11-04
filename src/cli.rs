@@ -40,10 +40,43 @@ pub struct Cli {
 }
 
 impl Cli {
-    /// Get HTTP address, error if not provided
+    /// Get HTTP address with validation
     pub fn http_address(&self) -> Result<SocketAddr> {
-        self.http
-            .context("--http flag is required for HTTP mode")
+        let addr = self.http
+            .context("--http flag is required for HTTP mode")?;
+
+        // Validate privileged ports
+        if addr.port() < 1024 {
+            anyhow::bail!(
+                "Port {} requires elevated privileges (root/sudo).\n\
+                 Use ports >= 1024 for unprivileged operation, e.g., --http {}:30437",
+                addr.port(),
+                addr.ip()
+            );
+        }
+
+        // Validate port 0 (OS-assigned ports break MCP client config)
+        if addr.port() == 0 {
+            anyhow::bail!(
+                "Port 0 is not allowed (OS-assigned ports not supported).\n\
+                 Specify an explicit port, e.g., --http {}:30437",
+                addr.ip()
+            );
+        }
+
+        // Warn about wildcard binding security implications
+        if addr.ip().is_unspecified() {
+            log::warn!(
+                "Binding to {} exposes server on all network interfaces.",
+                addr.ip()
+            );
+            log::warn!(
+                "For local-only access, use: --http 127.0.0.1:{}",
+                addr.port()
+            );
+        }
+
+        Ok(addr)
     }
 
     /// Get TLS configuration if both cert and key provided

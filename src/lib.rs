@@ -3,6 +3,8 @@ use clap::Parser;
 use kodegen_tools_config::ConfigManager;
 use kodegen_utils::usage_tracker::UsageTracker;
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use std::sync::Arc;
 
 pub mod cli;
 pub mod managers;
@@ -107,6 +109,9 @@ where
     // Build routers using provided registration function
     let routers = register_tools(&config_manager, &usage_tracker)?;
 
+    // Create session manager for stateful HTTP
+    let session_manager = Arc::new(LocalSessionManager::default());
+
     // Create HTTP server
     let server = HttpServer::new(
         routers.tool_router,
@@ -114,6 +119,7 @@ where
         usage_tracker,
         config_manager,
         routers.managers,
+        session_manager,
     );
 
     // Start server

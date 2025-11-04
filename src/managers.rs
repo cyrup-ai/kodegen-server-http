@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 /// Maximum time to wait for a single manager to shut down.
 /// 
@@ -18,7 +19,7 @@ const PER_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
 /// The core server handles calling shutdown() on graceful termination.
 #[derive(Default)]
 pub struct Managers {
-    shutdown_hooks: Vec<Box<dyn ShutdownHook>>,
+    shutdown_hooks: Mutex<Vec<Box<dyn ShutdownHook>>>,
 }
 
 /// Trait for components that need graceful shutdown
@@ -34,7 +35,7 @@ pub trait ShutdownHook: Send + Sync {
 impl Managers {
     pub fn new() -> Self {
         Self {
-            shutdown_hooks: Vec::new(),
+            shutdown_hooks: Mutex::new(Vec::new()),
         }
     }
 
@@ -45,8 +46,8 @@ impl Managers {
     /// let browser_manager = Arc::new(BrowserManager::new());
     /// managers.register(browser_manager.clone());
     /// ```
-    pub fn register<H: ShutdownHook + 'static>(&mut self, hook: H) {
-        self.shutdown_hooks.push(Box::new(hook));
+    pub async fn register<H: ShutdownHook + 'static>(&self, hook: H) {
+        self.shutdown_hooks.lock().await.push(Box::new(hook));
     }
 
     /// Shutdown all registered managers gracefully in reverse registration order (LIFO)
@@ -65,20 +66,35 @@ impl Managers {
     /// Continues shutdown for all managers even if some fail (fail-slow approach).
     /// Returns error if any manager shutdown failed.
     pub async fn shutdown(&self) -> Result<()> {
+        let count = {
+            let hooks = self.shutdown_hooks.lock().await;
+            hooks.len()
+        };
+        
         log::info!(
             "Shutting down {} managers sequentially (LIFO order, {}s timeout each)",
-            self.shutdown_hooks.len(),
+            count,
             PER_MANAGER_TIMEOUT.as_secs()
         );
 
         let mut errors = Vec::new();
 
         // Shut down in reverse order of registration (LIFO)
-        for (i, hook) in self.shutdown_hooks.iter().enumerate().rev() {
+        // We need to lock for each iteration to avoid holding the lock across await
+        for i in (0..count).rev() {
             log::debug!("Shutting down manager {} (timeout: {:?})", i, PER_MANAGER_TIMEOUT);
 
-            // Wrap each manager shutdown in a timeout
-            match tokio::time::timeout(PER_MANAGER_TIMEOUT, hook.shutdown()).await {
+            // Lock, get the hook reference, then immediately drop the lock
+            let hooks = self.shutdown_hooks.lock().await;
+            let result = if let Some(hook) = hooks.get(i) {
+                // Wrap each manager shutdown in a timeout
+                tokio::time::timeout(PER_MANAGER_TIMEOUT, hook.shutdown()).await
+            } else {
+                continue;
+            };
+            drop(hooks);
+
+            match result {
                 Ok(Ok(_)) => {
                     log::debug!("Manager {} shutdown complete", i);
                 }
@@ -104,7 +120,7 @@ impl Managers {
             return Err(anyhow::anyhow!(
                 "{} out of {} managers failed to shutdown",
                 errors.len(),
-                self.shutdown_hooks.len()
+                count
             ));
         }
 

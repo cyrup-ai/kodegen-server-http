@@ -6,18 +6,59 @@ use rmcp::{
     handler::server::router::{prompt::PromptRouter, tool::ToolRouter},
     model::*,
     service::RequestContext,
-    transport::streamable_http_server::{
-        StreamableHttpService, StreamableHttpServerConfig,
-        session::local::LocalSessionManager,
+    transport::{
+        common::server_side_http::SessionId,
+        streamable_http_server::{
+            SessionManager,
+            StreamableHttpService, StreamableHttpServerConfig,
+            session::local::LocalSessionManager,
+        },
     },
 };
+use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use axum::Router;
 use tower_http::cors::CorsLayer;
+
+/// Wrapper for LocalSessionManager to enable graceful shutdown
+/// 
+/// Implements ShutdownHook to close all active HTTP sessions during server shutdown.
+/// Each session runs a background tokio task that must be explicitly closed.
+struct LocalSessionManagerHook {
+    session_manager: Arc<LocalSessionManager>,
+}
+
+impl crate::managers::ShutdownHook for LocalSessionManagerHook {
+    fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+        Box::pin(async move {
+            log::info!("Shutting down LocalSessionManager");
+            
+            // Get all active session IDs (sessions field is public)
+            let session_ids: Vec<SessionId> = {
+                let sessions = self.session_manager.sessions.read().await;
+                sessions.keys().cloned().collect()
+            };
+            
+            log::debug!("Closing {} active HTTP sessions", session_ids.len());
+            
+            // Close each session gracefully (sends SessionEvent::Close to worker)
+            for session_id in session_ids {
+                match self.session_manager.close_session(&session_id).await {
+                    Ok(_) => log::trace!("Closed session: {}", session_id),
+                    Err(e) => log::warn!("Failed to close session {}: {}", session_id, e),
+                }
+            }
+            
+            log::info!("LocalSessionManager shutdown complete");
+            Ok(())
+        })
+    }
+}
 
 /// MCP Server that serves tools via Streamable HTTP transport
 #[derive(Clone)]
@@ -28,6 +69,7 @@ pub struct HttpServer {
     config_manager: kodegen_tools_config::ConfigManager,
     managers: std::sync::Arc<crate::managers::Managers>,
     active_requests: Arc<AtomicUsize>,
+    session_manager: Arc<LocalSessionManager>,
 }
 
 impl HttpServer {
@@ -38,6 +80,7 @@ impl HttpServer {
         usage_tracker: UsageTracker,
         config_manager: kodegen_tools_config::ConfigManager,
         managers: crate::managers::Managers,
+        session_manager: Arc<LocalSessionManager>,
     ) -> Self {
         Self {
             tool_router,
@@ -46,6 +89,7 @@ impl HttpServer {
             config_manager,
             managers: std::sync::Arc::new(managers),
             active_requests: Arc::new(AtomicUsize::new(0)),
+            session_manager,
         }
     }
 
@@ -82,8 +126,11 @@ impl HttpServer {
         let (completion_tx, completion_rx) = oneshot::channel();
         let ct = CancellationToken::new();
 
-        // Create session manager for stateful HTTP
-        let session_manager = Arc::new(LocalSessionManager::default());
+        // Register session manager for graceful shutdown
+        let session_manager = self.session_manager.clone();
+        managers.register(LocalSessionManagerHook {
+            session_manager: session_manager.clone(),
+        }).await;
 
         // Create service factory closure
         let service_factory = {
@@ -382,7 +429,7 @@ impl ServerHandler for HttpServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<InitializeResult, McpError> {
         // Store client info (fire-and-forget, errors logged in background task)
-        self.config_manager.set_client_info(request.client_info).await;
+        let _ = self.config_manager.set_client_info(request.client_info).await;
         Ok(self.get_info())
     }
 }

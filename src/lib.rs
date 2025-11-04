@@ -82,7 +82,13 @@ where
     env_logger::init();
 
     // Install rustls CryptoProvider (required for HTTPS)
-    let _ = rustls::crypto::ring::default_provider().install_default();
+    // This is idempotent: if a provider is already installed (e.g., by a parent
+    // application), we log and continue rather than failing.
+    if let Err(_existing_provider) = rustls::crypto::ring::default_provider().install_default() {
+        log::debug!(
+            "rustls crypto provider already installed (likely by parent application or test harness)"
+        );
+    }
 
     // Parse CLI arguments
     let cli = Cli::parse();
@@ -95,6 +101,7 @@ where
     let usage_tracker = UsageTracker::new(format!("{}-{}", category, instance_id));
 
     // Initialize global tool history tracking
+    log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
     kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
 
     // Build routers using provided registration function
@@ -124,7 +131,9 @@ where
         addr
     );
 
-    let handle = server.serve_with_tls(addr, cli.tls_config()).await?;
+    // Get shutdown timeout configuration
+    let timeout = cli.shutdown_timeout();
+    let handle = server.serve_with_tls(addr, cli.tls_config(), timeout).await?;
 
     log::info!("{} server running on {}://{}", category, protocol, addr);
     if cli.tls_config().is_some() {
@@ -136,7 +145,6 @@ where
     wait_for_shutdown_signal().await?;
 
     // Graceful shutdown
-    let timeout = cli.shutdown_timeout();
     log::info!(
         "Shutdown signal received, initiating graceful shutdown (timeout: {:?})",
         timeout
@@ -147,19 +155,19 @@ where
     match handle.wait_for_completion(timeout).await {
         Ok(()) => {
             log::info!("{} server shutdown completed successfully", category);
+            log::info!("{} server stopped", category);
+            Ok(())
         }
-        Err(_elapsed) => {
-            log::warn!(
+        Err(elapsed) => {
+            let error = anyhow::anyhow!(
                 "{} server shutdown timeout ({:?}) elapsed before completion",
                 category,
-                timeout
+                elapsed
             );
+            log::error!("{}", error);
+            Err(error)
         }
     }
-
-    log::info!("{} server stopped", category);
-
-    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {

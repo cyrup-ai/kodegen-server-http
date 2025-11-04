@@ -1,5 +1,4 @@
 use anyhow::Result;
-use futures::future::join_all;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -40,24 +39,47 @@ impl Managers {
         self.shutdown_hooks.push(Box::new(hook));
     }
 
-    /// Shutdown all registered managers gracefully in parallel
+    /// Shutdown all registered managers gracefully in reverse registration order (LIFO)
+    ///
+    /// Managers are shut down **sequentially** in reverse order of registration.
+    /// This matches Rust's Drop trait convention and ensures that managers registered
+    /// later (which may depend on earlier managers) shut down first.
+    ///
+    /// Example:
+    /// ```
+    /// managers.register(database_pool);  // Shuts down last
+    /// managers.register(cache_manager);  // Shuts down first
+    /// ```
     ///
     /// Called automatically by core server before exit.
-    /// Logs warnings for individual failures but continues shutdown.
+    /// Continues shutdown for all managers even if some fail (fail-slow approach).
+    /// Returns error if any manager shutdown failed.
     pub async fn shutdown(&self) -> Result<()> {
-        log::info!("Shutting down {} managers in parallel", self.shutdown_hooks.len());
+        log::info!(
+            "Shutting down {} managers sequentially (LIFO order)",
+            self.shutdown_hooks.len()
+        );
 
-        let shutdown_futures: Vec<_> = self.shutdown_hooks
-            .iter()
-            .enumerate()
-            .map(|(i, hook)| async move {
-                if let Err(e) = hook.shutdown().await {
-                    log::warn!("Failed to shutdown manager {}: {}", i, e);
-                }
-            })
-            .collect();
+        let mut errors = Vec::new();
 
-        join_all(shutdown_futures).await;
+        // Shut down in reverse order of registration (LIFO)
+        for (i, hook) in self.shutdown_hooks.iter().enumerate().rev() {
+            log::debug!("Shutting down manager {}", i);
+            if let Err(e) = hook.shutdown().await {
+                log::error!("Failed to shutdown manager {}: {}", i, e);
+                errors.push((i, e));
+            }
+        }
+
+        if !errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "{} out of {} managers failed to shutdown",
+                errors.len(),
+                self.shutdown_hooks.len()
+            ));
+        }
+
+        log::info!("All managers shut down successfully");
         Ok(())
     }
 }

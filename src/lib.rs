@@ -101,6 +101,7 @@ where
     let usage_tracker = UsageTracker::new(format!("{}-{}", category, instance_id));
 
     // Initialize global tool history tracking
+    log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
     kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
 
     // Build routers using provided registration function
@@ -153,19 +154,19 @@ where
     match handle.wait_for_completion(timeout).await {
         Ok(()) => {
             log::info!("{} server shutdown completed successfully", category);
+            log::info!("{} server stopped", category);
+            Ok(())
         }
-        Err(_elapsed) => {
-            log::warn!(
+        Err(elapsed) => {
+            let error = anyhow::anyhow!(
                 "{} server shutdown timeout ({:?}) elapsed before completion",
                 category,
-                timeout
+                elapsed
             );
+            log::error!("{}", error);
+            Err(error)
         }
     }
-
-    log::info!("{} server stopped", category);
-
-    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> Result<()> {

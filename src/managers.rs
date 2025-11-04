@@ -43,21 +43,35 @@ impl Managers {
     /// Shutdown all registered managers gracefully in parallel
     ///
     /// Called automatically by core server before exit.
-    /// Logs warnings for individual failures but continues shutdown.
+    /// Continues shutdown for all managers even if some fail (fail-slow approach).
+    /// Returns error if any manager shutdown failed.
     pub async fn shutdown(&self) -> Result<()> {
         log::info!("Shutting down {} managers in parallel", self.shutdown_hooks.len());
 
-        let shutdown_futures: Vec<_> = self.shutdown_hooks
-            .iter()
-            .enumerate()
-            .map(|(i, hook)| async move {
-                if let Err(e) = hook.shutdown().await {
-                    log::warn!("Failed to shutdown manager {}: {}", i, e);
-                }
-            })
-            .collect();
+        let results: Vec<_> = join_all(
+            self.shutdown_hooks
+                .iter()
+                .enumerate()
+                .map(|(i, hook)| async move {
+                    hook.shutdown().await.map_err(|e| (i, e))
+                })
+        )
+        .await;
 
-        join_all(shutdown_futures).await;
+        let errors: Vec<_> = results.into_iter().filter_map(|r| r.err()).collect();
+
+        if !errors.is_empty() {
+            for (i, e) in &errors {
+                log::error!("Failed to shutdown manager {}: {}", i, e);
+            }
+            return Err(anyhow::anyhow!(
+                "{} out of {} managers failed to shutdown",
+                errors.len(),
+                self.shutdown_hooks.len()
+            ));
+        }
+
+        log::info!("All managers shut down successfully");
         Ok(())
     }
 }

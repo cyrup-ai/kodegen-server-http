@@ -20,6 +20,21 @@ pub struct Cli {
     pub tls_key: Option<PathBuf>,
 
     /// Graceful shutdown timeout in seconds
+    ///
+    /// Timeout budget allocation:
+    /// - 70% allocated for HTTP connection draining (graceful close)
+    /// - 30% reserved for request completion and manager cleanup
+    ///
+    /// Example with 30s timeout:
+    /// - HTTP connections: 21 seconds to close gracefully
+    /// - Cleanup phase: 9 seconds (request drain + manager shutdown)
+    ///
+    /// Example with 10s timeout:
+    /// - HTTP connections: 7 seconds
+    /// - Cleanup phase: 3 seconds
+    ///
+    /// Note: Request drain and manager timeouts are independent but must
+    /// fit within the cleanup buffer. See server.rs for details.
     #[arg(long, value_name = "SECONDS", default_value = "30")]
     pub shutdown_timeout_secs: u64,
 }

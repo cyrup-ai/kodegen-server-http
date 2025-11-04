@@ -12,7 +12,7 @@ pub mod server;
 pub use cli::Cli;
 pub use managers::{Managers, ShutdownHook};
 pub use registration::{register_tool, register_tool_arc};
-pub use server::{ServerHandle, HttpServer};
+pub use server::{HttpServer, ServerHandle, ShutdownError};
 
 /// Container for routers and managers
 ///
@@ -158,13 +158,26 @@ where
             log::info!("{} server stopped", category);
             Ok(())
         }
-        Err(elapsed) => {
+        
+        Err(ShutdownError::Timeout(elapsed)) => {
             let error = anyhow::anyhow!(
-                "{} server shutdown timeout ({:?}) elapsed before completion",
+                "{} server shutdown timeout ({:?}) - operations still in progress",
                 category,
                 elapsed
             );
             log::error!("{}", error);
+            log::error!("Possible causes: slow request handlers, blocked manager cleanup, or stuck database connections");
+            Err(error)
+        }
+        
+        Err(ShutdownError::SignalLost) => {
+            let error = anyhow::anyhow!(
+                "{} server shutdown completion signal lost - monitor task may have panicked",
+                category
+            );
+            log::error!("{}", error);
+            log::error!("Check logs above for 'HTTP SERVER TASK EXITED UNEXPECTEDLY' or panic messages");
+            log::error!("Shutdown may have completed successfully but signal was lost");
             Err(error)
         }
     }

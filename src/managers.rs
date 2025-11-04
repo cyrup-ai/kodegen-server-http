@@ -1,6 +1,16 @@
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
+
+/// Maximum time to wait for a single manager to shut down.
+/// 
+/// Chosen to be generous for most operations:
+/// - Browser close: ~2-3 seconds
+/// - DB pool drain: ~3-5 seconds  
+/// - SSH tunnel disconnect: ~1-2 seconds
+/// - File cleanup: <1 second
+const PER_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Container for managers that require explicit shutdown
 ///
@@ -56,18 +66,37 @@ impl Managers {
     /// Returns error if any manager shutdown failed.
     pub async fn shutdown(&self) -> Result<()> {
         log::info!(
-            "Shutting down {} managers sequentially (LIFO order)",
-            self.shutdown_hooks.len()
+            "Shutting down {} managers sequentially (LIFO order, {}s timeout each)",
+            self.shutdown_hooks.len(),
+            PER_MANAGER_TIMEOUT.as_secs()
         );
 
         let mut errors = Vec::new();
 
         // Shut down in reverse order of registration (LIFO)
         for (i, hook) in self.shutdown_hooks.iter().enumerate().rev() {
-            log::debug!("Shutting down manager {}", i);
-            if let Err(e) = hook.shutdown().await {
-                log::error!("Failed to shutdown manager {}: {}", i, e);
-                errors.push((i, e));
+            log::debug!("Shutting down manager {} (timeout: {:?})", i, PER_MANAGER_TIMEOUT);
+
+            // Wrap each manager shutdown in a timeout
+            match tokio::time::timeout(PER_MANAGER_TIMEOUT, hook.shutdown()).await {
+                Ok(Ok(_)) => {
+                    log::debug!("Manager {} shutdown complete", i);
+                }
+                Ok(Err(e)) => {
+                    log::error!("Manager {} shutdown failed: {}", i, e);
+                    errors.push((i, e));
+                    // Continue to next manager instead of stopping
+                }
+                Err(_) => {
+                    let timeout_err = anyhow::anyhow!(
+                        "Manager {} shutdown timeout after {:?}",
+                        i,
+                        PER_MANAGER_TIMEOUT
+                    );
+                    log::error!("{}", timeout_err);
+                    errors.push((i, timeout_err));
+                    // Continue to next manager instead of hanging forever
+                }
             }
         }
 

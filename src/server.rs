@@ -64,10 +64,9 @@ impl crate::managers::ShutdownHook for LocalSessionManagerHook {
 ///
 /// Generic over `SessionManager` trait to enable pluggable session backends.
 /// Defaults to `LocalSessionManager` for backward compatibility.
-#[derive(Clone)]
 pub struct HttpServer<SM = LocalSessionManager>
 where
-    SM: SessionManager + Clone,
+    SM: SessionManager,
 {
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
@@ -78,9 +77,28 @@ where
     session_manager: Arc<SM>,
 }
 
+// Manual Clone implementation for HttpServer
+// Arc<SM> is Clone regardless of whether SM is Clone
+impl<SM> Clone for HttpServer<SM>
+where
+    SM: SessionManager,
+{
+    fn clone(&self) -> Self {
+        Self {
+            tool_router: self.tool_router.clone(),
+            prompt_router: self.prompt_router.clone(),
+            usage_tracker: self.usage_tracker.clone(),
+            config_manager: self.config_manager.clone(),
+            managers: self.managers.clone(),
+            active_requests: self.active_requests.clone(),
+            session_manager: self.session_manager.clone(),
+        }
+    }
+}
+
 impl<SM> HttpServer<SM>
 where
-    SM: SessionManager + Clone,
+    SM: SessionManager,
 {
     /// Create a new HTTP server with pre-built routers and managers
     pub fn new(

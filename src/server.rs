@@ -141,6 +141,17 @@ where
 
         log::info!("Starting HTTP server on {protocol}://{addr}");
 
+        // Pre-bind the socket to catch errors immediately
+        log::debug!("Attempting to bind to {}", addr);
+        let listener = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
+        
+        let std_listener = listener.into_std()
+            .map_err(|e| anyhow::anyhow!("Failed to convert listener to std::net::TcpListener: {}", e))?;
+        
+        log::info!("Successfully bound to {}", addr);
+
         // Allocate timeout budget (70% HTTP drain, 30% cleanup)
         let http_drain_timeout = shutdown_timeout.mul_f32(0.7);
         let manager_buffer = shutdown_timeout.mul_f32(0.3);
@@ -207,7 +218,7 @@ where
                     .map_err(|e| anyhow::anyhow!("Failed to load TLS configuration: {e}"))?;
 
             tokio::spawn(async move {
-                if let Err(e) = axum_server::bind_rustls(addr, rustls_config)
+                if let Err(e) = axum_server::from_tcp_rustls(std_listener, rustls_config)
                     .handle(axum_handle)
                     .serve(router.into_make_service())
                     .await
@@ -217,7 +228,7 @@ where
             })
         } else {
             tokio::spawn(async move {
-                if let Err(e) = axum_server::bind(addr)
+                if let Err(e) = axum_server::from_tcp(std_listener)
                     .handle(axum_handle)
                     .serve(router.into_make_service())
                     .await

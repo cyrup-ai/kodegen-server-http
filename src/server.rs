@@ -264,15 +264,14 @@ where
                         Ok(Err(e)) => {
                             log::error!("HTTP server task panicked during shutdown");
                             log::error!("  JoinError: {:?}", e);
-                            if e.is_panic() {
-                                if let Ok(panic_payload) = e.try_into_panic() {
-                                    if let Some(msg) = panic_payload.downcast_ref::<&str>() {
-                                        log::error!("  Panic message: {}", msg);
-                                    } else if let Some(msg) = panic_payload.downcast_ref::<String>() {
-                                        log::error!("  Panic message: {}", msg);
-                                    } else {
-                                        log::error!("  Panic payload: {:?}", panic_payload);
-                                    }
+                            if e.is_panic()
+                                && let Ok(panic_payload) = e.try_into_panic() {
+                                if let Some(msg) = panic_payload.downcast_ref::<&str>() {
+                                    log::error!("  Panic message: {}", msg);
+                                } else if let Some(msg) = panic_payload.downcast_ref::<String>() {
+                                    log::error!("  Panic message: {}", msg);
+                                } else {
+                                    log::error!("  Panic payload: {:?}", panic_payload);
                                 }
                             }
                         }
@@ -367,7 +366,7 @@ where
             log::debug!("Manager shutdown complete");
 
             // Signal shutdown complete (may fail if receiver timed out)
-            if let Err(_) = completion_tx.send(()) {
+            if completion_tx.send(()).is_err() {
                 log::debug!(
                     "Shutdown completion signal not delivered (receiver dropped). \
                      This is expected if wait_for_completion() timed out or was cancelled."

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
@@ -19,7 +20,7 @@ const PER_MANAGER_TIMEOUT: Duration = Duration::from_secs(10);
 /// The core server handles calling shutdown() on graceful termination.
 #[derive(Default)]
 pub struct Managers {
-    shutdown_hooks: Mutex<Vec<Box<dyn ShutdownHook>>>,
+    shutdown_hooks: Mutex<Vec<Arc<dyn ShutdownHook>>>,
 }
 
 /// Trait for components that need graceful shutdown
@@ -47,7 +48,7 @@ impl Managers {
     /// managers.register(browser_manager.clone());
     /// ```
     pub async fn register<H: ShutdownHook + 'static>(&self, hook: H) {
-        self.shutdown_hooks.lock().await.push(Box::new(hook));
+        self.shutdown_hooks.lock().await.push(Arc::new(hook));
     }
 
     /// Shutdown all registered managers gracefully in reverse registration order (LIFO)
@@ -84,15 +85,17 @@ impl Managers {
         for i in (0..count).rev() {
             log::debug!("Shutting down manager {} (timeout: {:?})", i, PER_MANAGER_TIMEOUT);
 
-            // Lock, get the hook reference, then immediately drop the lock
-            let hooks = self.shutdown_hooks.lock().await;
-            let result = if let Some(hook) = hooks.get(i) {
-                // Wrap each manager shutdown in a timeout
-                tokio::time::timeout(PER_MANAGER_TIMEOUT, hook.shutdown()).await
-            } else {
-                continue;
-            };
-            drop(hooks);
+            // Lock, clone the Arc, drop the lock, THEN await
+            let hook = {
+                let hooks = self.shutdown_hooks.lock().await;
+                match hooks.get(i) {
+                    Some(hook) => hook.clone(),  // Clone the Arc (cheap)
+                    None => continue,
+                }
+            };  // Lock automatically dropped here
+
+            // Now await without holding the lock
+            let result = tokio::time::timeout(PER_MANAGER_TIMEOUT, hook.shutdown()).await;
 
             match result {
                 Ok(Ok(_)) => {

@@ -3,8 +3,11 @@ use clap::Parser;
 use kodegen_tools_config::ConfigManager;
 use kodegen_utils::usage_tracker::UsageTracker;
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
-use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::streamable_http_server::session::local::{LocalSessionManager, SessionConfig};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub mod cli;
 pub mod managers;
@@ -78,7 +81,7 @@ pub async fn run_http_server<F>(
     register_tools: F,
 ) -> Result<()>
 where
-    F: FnOnce(&ConfigManager, &UsageTracker) -> Result<RouterSet<HttpServer>>,
+    F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
 {
     // Initialize logging
     env_logger::init();
@@ -99,18 +102,28 @@ where
     let config_manager = ConfigManager::new();
     config_manager.init().await?;
 
-    let instance_id = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let timestamp = chrono::Utc::now();
+    let pid = std::process::id();
+    let instance_id = format!("{}-{}", timestamp.format("%Y%m%d-%H%M%S-%9f"), pid);
     let usage_tracker = UsageTracker::new(format!("{}-{}", category, instance_id));
 
     // Initialize global tool history tracking
     log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
     kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
 
-    // Build routers using provided registration function
-    let routers = register_tools(&config_manager, &usage_tracker)?;
+    // Build routers using provided async registration function
+    let routers = register_tools(&config_manager, &usage_tracker).await?;
 
-    // Create session manager for stateful HTTP
-    let session_manager = Arc::new(LocalSessionManager::default());
+    // Create session manager for stateful HTTP with production-ready configuration
+    // Sessions automatically expire after 1 hour of inactivity to prevent memory growth
+    let session_config = SessionConfig {
+        channel_capacity: 16,
+        keep_alive: Some(Duration::from_secs(3600)),  // 1 hour timeout
+    };
+    let session_manager = Arc::new(LocalSessionManager {
+        sessions: Default::default(),
+        session_config,
+    });
 
     // Create HTTP server
     let server = HttpServer::new(

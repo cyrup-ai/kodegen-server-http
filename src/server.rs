@@ -61,18 +61,27 @@ impl crate::managers::ShutdownHook for LocalSessionManagerHook {
 }
 
 /// MCP Server that serves tools via Streamable HTTP transport
+///
+/// Generic over `SessionManager` trait to enable pluggable session backends.
+/// Defaults to `LocalSessionManager` for backward compatibility.
 #[derive(Clone)]
-pub struct HttpServer {
+pub struct HttpServer<SM = LocalSessionManager>
+where
+    SM: SessionManager + Clone,
+{
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
     usage_tracker: UsageTracker,
     config_manager: kodegen_tools_config::ConfigManager,
     managers: std::sync::Arc<crate::managers::Managers>,
     active_requests: Arc<AtomicUsize>,
-    session_manager: Arc<LocalSessionManager>,
+    session_manager: Arc<SM>,
 }
 
-impl HttpServer {
+impl<SM> HttpServer<SM>
+where
+    SM: SessionManager + Clone,
+{
     /// Create a new HTTP server with pre-built routers and managers
     pub fn new(
         tool_router: ToolRouter<Self>,
@@ -80,7 +89,7 @@ impl HttpServer {
         usage_tracker: UsageTracker,
         config_manager: kodegen_tools_config::ConfigManager,
         managers: crate::managers::Managers,
-        session_manager: Arc<LocalSessionManager>,
+        session_manager: Arc<SM>,
     ) -> Self {
         Self {
             tool_router,
@@ -102,7 +111,10 @@ impl HttpServer {
         addr: SocketAddr,
         tls_config: Option<(PathBuf, PathBuf)>,
         shutdown_timeout: Duration,
-    ) -> Result<ServerHandle> {
+    ) -> Result<ServerHandle>
+    where
+        SM: std::any::Any + 'static,
+    {
         use tokio::sync::oneshot;
         use tokio_util::sync::CancellationToken;
 
@@ -126,11 +138,21 @@ impl HttpServer {
         let (completion_tx, completion_rx) = oneshot::channel();
         let ct = CancellationToken::new();
 
-        // Register session manager for graceful shutdown
+        // Register session manager for graceful shutdown (LocalSessionManager only)
+        // Uses type downcast to check if session_manager is LocalSessionManager
+        // Other SessionManager implementations would handle shutdown differently
         let session_manager = self.session_manager.clone();
-        managers.register(LocalSessionManagerHook {
-            session_manager: session_manager.clone(),
-        }).await;
+        let session_manager_any: &dyn std::any::Any = &*session_manager;
+        if session_manager_any.downcast_ref::<LocalSessionManager>().is_some() {
+            // SAFETY: We just confirmed that SM is LocalSessionManager via downcast_ref.
+            // Therefore Arc<SM> and Arc<LocalSessionManager> are the same type at runtime.
+            let local_sm: Arc<LocalSessionManager> = unsafe {
+                std::mem::transmute(session_manager.clone())
+            };
+            managers.register(LocalSessionManagerHook {
+                session_manager: local_sm,
+            }).await;
+        }
 
         // Create service factory closure
         let service_factory = {
@@ -315,14 +337,23 @@ impl HttpServer {
             }
             log::debug!("Manager shutdown complete");
 
-            let _ = completion_tx.send(());
+            // Signal shutdown complete (may fail if receiver timed out)
+            if let Err(_) = completion_tx.send(()) {
+                log::debug!(
+                    "Shutdown completion signal not delivered (receiver dropped). \
+                     This is expected if wait_for_completion() timed out or was cancelled."
+                );
+            }
         });
 
         Ok(ServerHandle::new(ct, completion_rx))
     }
 }
 
-impl ServerHandler for HttpServer {
+impl<SM> ServerHandler for HttpServer<SM>
+where
+    SM: SessionManager,
+{
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::V_2024_11_05,

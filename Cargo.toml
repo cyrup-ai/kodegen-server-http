@@ -18,9 +18,9 @@ keywords = [
 
 [dependencies]
 # Internal dependencies
-kodegen_tools_config = { version = "0.1", path = "../kodegen-tools-config" }
-kodegen_utils = { version = "0.1", path = "../kodegen-utils" }
-kodegen_mcp_tool = { version = "0.1", path = "../kodegen-mcp-tool" }
+kodegen_tools_config = { version = "0.1" }
+kodegen_utils = { version = "0.1" }
+kodegen_mcp_tool = { version = "0.1" }
 
 # MCP SDK with Streamable HTTP feature (NOT sse-server!)
 rmcp = { version = "0.8", features = ["server", "transport-streamable-http-server"] }

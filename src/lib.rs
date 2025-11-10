@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use kodegen_tools_config::ConfigManager;
+use kodegen_config_manager::ConfigManager;
 use kodegen_utils::usage_tracker::UsageTracker;
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 use rmcp::transport::streamable_http_server::session::local::{LocalSessionManager, SessionConfig};

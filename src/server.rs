@@ -71,7 +71,7 @@ where
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
     usage_tracker: UsageTracker,
-    config_manager: kodegen_tools_config::ConfigManager,
+    config_manager: kodegen_config_manager::ConfigManager,
     managers: std::sync::Arc<crate::managers::Managers>,
     active_requests: Arc<AtomicUsize>,
     session_manager: Arc<SM>,
@@ -105,7 +105,7 @@ where
         tool_router: ToolRouter<Self>,
         prompt_router: PromptRouter<Self>,
         usage_tracker: UsageTracker,
-        config_manager: kodegen_tools_config::ConfigManager,
+        config_manager: kodegen_config_manager::ConfigManager,
         managers: crate::managers::Managers,
         session_manager: Arc<SM>,
     ) -> Self {

@@ -48,6 +48,96 @@ where
     }
 }
 
+/// Create HTTP server programmatically without CLI argument parsing
+///
+/// This is the library API for embedding servers in other applications.
+/// Unlike run_http_server(), this does not parse CLI args or block on shutdown signals.
+///
+/// Returns a ServerHandle immediately - the server runs in background tasks.
+/// Call handle.cancel() and handle.wait_for_completion() for graceful shutdown.
+///
+/// Example usage:
+/// ```
+/// use kodegen_server_http::{create_http_server, RouterSet, Managers, register_tool};
+/// use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
+/// use std::time::Duration;
+///
+/// let addr = "127.0.0.1:30437".parse()?;
+/// let handle = create_http_server("filesystem", addr, None, Duration::from_secs(30), |config, tracker| {
+///     Box::pin(async move {
+///         let tool_router = ToolRouter::new();
+///         let prompt_router = PromptRouter::new();
+///         let managers = Managers::new();
+///         // Register tools...
+///         Ok(RouterSet::new(tool_router, prompt_router, managers))
+///     })
+/// }).await?;
+///
+/// // Server is now running in background tasks
+/// // handle.cancel() to shutdown
+/// ```
+pub async fn create_http_server<F>(
+    category: &str,
+    addr: std::net::SocketAddr,
+    tls_config: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    shutdown_timeout: Duration,
+    register_tools: F,
+) -> Result<ServerHandle>
+where
+    F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
+{
+    // Install rustls CryptoProvider (idempotent)
+    if let Err(_) = rustls::crypto::ring::default_provider().install_default() {
+        log::debug!("rustls crypto provider already installed");
+    }
+
+    // Initialize shared components
+    let config_manager = ConfigManager::new();
+    config_manager.init().await?;
+
+    let timestamp = chrono::Utc::now();
+    let pid = std::process::id();
+    let instance_id = format!("{}-{}", timestamp.format("%Y%m%d-%H%M%S-%9f"), pid);
+    let usage_tracker = UsageTracker::new(format!("{}-{}", category, instance_id));
+
+    // Initialize global tool history tracking
+    log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
+    kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
+
+    // Build routers using provided async registration function
+    let routers = register_tools(&config_manager, &usage_tracker).await?;
+
+    // Create session manager with production configuration
+    let session_config = SessionConfig {
+        channel_capacity: 16,
+        keep_alive: Some(Duration::from_secs(3600)),  // 1 hour timeout
+    };
+    let session_manager = Arc::new(LocalSessionManager {
+        sessions: Default::default(),
+        session_config,
+    });
+
+    // Create HTTP server
+    let server = HttpServer::new(
+        routers.tool_router,
+        routers.prompt_router,
+        usage_tracker,
+        config_manager,
+        routers.managers,
+        session_manager,
+    );
+
+    let protocol = if tls_config.is_some() { "https" } else { "http" };
+    log::info!("Starting {} HTTP server on {}://{}", category, protocol, addr);
+
+    // Start server (non-blocking - returns ServerHandle immediately)
+    let handle = server.serve_with_tls(addr, tls_config, shutdown_timeout).await?;
+
+    log::info!("{} server running on {}://{}", category, protocol, addr);
+    
+    Ok(handle)
+}
+
 /// Main entry point for category HTTP servers
 ///
 /// Handles all boilerplate: CLI parsing, config initialization,

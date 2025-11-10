@@ -87,7 +87,7 @@ where
     F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
 {
     // Install rustls CryptoProvider (idempotent)
-    if let Err(_) = rustls::crypto::ring::default_provider().install_default() {
+    if rustls::crypto::ring::default_provider().install_default().is_err() {
         log::debug!("rustls crypto provider already installed");
     }
 
@@ -179,7 +179,7 @@ where
     // Install rustls CryptoProvider (required for HTTPS)
     // This is idempotent: if a provider is already installed (e.g., by a parent
     // application), we log and continue rather than failing.
-    if let Err(_existing_provider) = rustls::crypto::ring::default_provider().install_default() {
+    if rustls::crypto::ring::default_provider().install_default().is_err() {
         log::debug!(
             "rustls crypto provider already installed (likely by parent application or test harness)"
         );

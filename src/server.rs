@@ -23,7 +23,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use axum::Router;
+use tower::Service;
 use tower_http::cors::CorsLayer;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use tokio_rustls::{
+    rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+    TlsAcceptor,
+};
 
 /// Wrapper for LocalSessionManager to enable graceful shutdown
 /// 
@@ -58,6 +64,30 @@ impl crate::managers::ShutdownHook for LocalSessionManagerHook {
             Ok(())
         })
     }
+}
+
+/// Build rustls ServerConfig from PEM files
+fn build_rustls_config(
+    cert_path: PathBuf,
+    key_path: PathBuf,
+) -> Result<Arc<rustls::ServerConfig>> {
+    let key = PrivateKeyDer::from_pem_file(key_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load private key: {e}"))?;
+    
+    let certs: Vec<CertificateDer> = CertificateDer::pem_file_iter(cert_path)
+        .map_err(|e| anyhow::anyhow!("Failed to load certificates: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("Invalid certificate: {e}"))?;
+    
+    let mut config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certs, key)
+        .map_err(|e| anyhow::anyhow!("Failed to build TLS config: {e}"))?;
+    
+    // Enable HTTP/2 and HTTP/1.1
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    
+    Ok(Arc::new(config))
 }
 
 /// MCP Server that serves tools via Streamable HTTP transport
@@ -147,9 +177,6 @@ where
             .await
             .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
         
-        let std_listener = listener.into_std()
-            .map_err(|e| anyhow::anyhow!("Failed to convert listener to std::net::TcpListener: {}", e))?;
-        
         log::info!("Successfully bound to {}", addr);
 
         // Allocate timeout budget (70% HTTP drain, 30% cleanup)
@@ -204,33 +231,77 @@ where
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
 
-        // Create axum-server handle for graceful shutdown
-        let axum_handle = axum_server::Handle::new();
-        let shutdown_handle = axum_handle.clone();
-
         // Spawn server with or without TLS
         let server_task = if let Some((cert_path, key_path)) = tls_config {
             log::info!("Loading TLS certificate from: {cert_path:?}");
-
-            let rustls_config =
-                axum_server::tls_rustls::RustlsConfig::from_pem_file(cert_path, key_path)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to load TLS configuration: {e}"))?;
-
+            
+            let rustls_config = build_rustls_config(cert_path, key_path)?;
+            let tls_acceptor = TlsAcceptor::from(rustls_config);
+            let ct_for_tls = ct.clone();
+            let active_requests = self.active_requests.clone();
+            
             tokio::spawn(async move {
-                if let Err(e) = axum_server::from_tcp_rustls(std_listener, rustls_config)
-                    .handle(axum_handle)
-                    .serve(router.into_make_service())
-                    .await
-                {
-                    log::error!("HTTP server error: {e}");
+                loop {
+                    // Accept TCP connection
+                    let (tcp_stream, remote_addr) = tokio::select! {
+                        _ = ct_for_tls.cancelled() => break,
+                        result = listener.accept() => {
+                            match result {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    log::error!("Failed to accept connection: {e}");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    
+                    // Clone for task
+                    let tls_acceptor = tls_acceptor.clone();
+                    let router = router.clone();
+                    let active_requests = active_requests.clone();
+                    
+                    // Spawn connection handler
+                    tokio::spawn(async move {
+                        // TLS handshake
+                        let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                log::error!("TLS handshake failed from {remote_addr}: {e}");
+                                return;
+                            }
+                        };
+                        
+                        // Convert to hyper-compatible IO
+                        let io = TokioIo::new(tls_stream);
+                        
+                        // Create hyper service from router
+                        let tower_service = router.clone();
+                        let hyper_service = hyper::service::service_fn(move |request| {
+                            tower_service.clone().call(request)
+                        });
+                        
+                        // Track active request
+                        let _guard = RequestGuard::new(active_requests.clone());
+                        
+                        // Serve connection
+                        if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection_with_upgrades(io, hyper_service)
+                            .await
+                        {
+                            log::debug!("Connection error from {remote_addr}: {e}");
+                        }
+                    });
                 }
             })
         } else {
+            // HTTP (no TLS) - use axum::serve directly
+            let ct_for_http = ct.clone();
             tokio::spawn(async move {
-                if let Err(e) = axum_server::from_tcp(std_listener)
-                    .handle(axum_handle)
-                    .serve(router.into_make_service())
+                if let Err(e) = axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        ct_for_http.cancelled().await;
+                    })
                     .await
                 {
                     log::error!("HTTP server error: {e}");
@@ -252,10 +323,8 @@ where
                 _ = ct_clone.cancelled() => {
                     log::debug!("Cancellation triggered, initiating graceful shutdown");
                     
-                    // Trigger HTTP shutdown with 70% of timeout allocated for connection draining
-                    shutdown_handle.graceful_shutdown(Some(http_drain_timeout));
-
-                    // Wait for HTTP server to complete shutdown (with 5s safety buffer)
+                    // Cancellation token already triggered shutdown via with_graceful_shutdown()
+                    // Just wait for server task to complete
                     let server_shutdown_timeout = http_drain_timeout + Duration::from_secs(5);
                     match tokio::time::timeout(server_shutdown_timeout, &mut server_task).await {
                         Ok(Ok(_)) => {
@@ -297,7 +366,7 @@ where
                     match result {
                         Ok(_) => {
                             log::error!("Server exited normally without cancellation signal");
-                            log::error!("This indicates a bug in axum-server or misconfiguration");
+                            log::error!("This indicates a bug in the server implementation or misconfiguration");
                         }
                         Err(e) => {
                             log::error!("Server task PANICKED");

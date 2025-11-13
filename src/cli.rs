@@ -37,6 +37,21 @@ pub struct Cli {
     /// fit within the cleanup buffer. See server.rs for details.
     #[arg(long, value_name = "SECONDS", default_value = "30")]
     pub shutdown_timeout_secs: u64,
+
+    /// Session keep-alive timeout in seconds (0 or omit = infinite, default: infinite)
+    ///
+    /// Controls how long idle HTTP sessions remain active before expiring.
+    /// - 0 or omitted: Infinite - sessions never timeout (recommended)
+    /// - Positive value: Sessions expire after N seconds of inactivity
+    ///
+    /// Examples:
+    ///   --keep-alive 3600    # 1 hour timeout
+    ///   --keep-alive 0       # Infinite (same as omitting flag)
+    ///
+    /// Note: Infinite keep-alive is recommended. Sessions are still cleaned up
+    /// when clients disconnect or the server restarts.
+    #[arg(long, value_name = "SECONDS")]
+    pub keep_alive: Option<u64>,
 }
 
 impl Cli {
@@ -90,5 +105,17 @@ impl Cli {
     /// Get shutdown timeout duration
     pub fn shutdown_timeout(&self) -> Duration {
         Duration::from_secs(self.shutdown_timeout_secs)
+    }
+
+    /// Convert CLI keep-alive argument to SessionConfig duration
+    ///
+    /// - None or Some(0) → None (infinite keep-alive)
+    /// - Some(n) → Some(Duration::from_secs(n))
+    pub fn session_keep_alive(&self) -> Option<Duration> {
+        match self.keep_alive {
+            None => None,  // Not specified = infinite (default)
+            Some(0) => None,  // Explicit 0 = infinite
+            Some(n) => Some(Duration::from_secs(n)),  // Positive value = timeout
+        }
     }
 }

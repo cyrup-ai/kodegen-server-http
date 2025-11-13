@@ -81,6 +81,7 @@ pub async fn create_http_server<F>(
     addr: std::net::SocketAddr,
     tls_config: Option<(std::path::PathBuf, std::path::PathBuf)>,
     shutdown_timeout: Duration,
+    cli: &cli::Cli,
     register_tools: F,
 ) -> Result<ServerHandle>
 where
@@ -110,8 +111,15 @@ where
     // Create session manager with production configuration
     let session_config = SessionConfig {
         channel_capacity: 16,
-        keep_alive: Some(Duration::from_secs(3600)),  // 1 hour timeout
+        keep_alive: cli.session_keep_alive(),  // Use CLI value or default (None)
     };
+
+    // Log configured keep-alive for observability
+    match session_config.keep_alive {
+        None => log::info!("Session keep-alive: infinite (no timeout)"),
+        Some(duration) => log::info!("Session keep-alive: {:?}", duration),
+    }
+
     let session_manager = Arc::new(LocalSessionManager {
         sessions: Default::default(),
         session_config,
@@ -205,11 +213,17 @@ where
     let routers = register_tools(&config_manager, &usage_tracker).await?;
 
     // Create session manager for stateful HTTP with production-ready configuration
-    // Sessions automatically expire after 1 hour of inactivity to prevent memory growth
     let session_config = SessionConfig {
         channel_capacity: 16,
-        keep_alive: Some(Duration::from_secs(3600)),  // 1 hour timeout
+        keep_alive: cli.session_keep_alive(),  // Use CLI value or default (None)
     };
+
+    // Log configured keep-alive for observability
+    match session_config.keep_alive {
+        None => log::info!("Session keep-alive: infinite (no timeout)"),
+        Some(duration) => log::info!("Session keep-alive: {:?}", duration),
+    }
+
     let session_manager = Arc::new(LocalSessionManager {
         sessions: Default::default(),
         session_config,

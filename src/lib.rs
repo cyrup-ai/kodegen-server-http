@@ -56,6 +56,14 @@ where
 /// Returns a ServerHandle immediately - the server runs in background tasks.
 /// Call handle.cancel() and handle.wait_for_completion() for graceful shutdown.
 ///
+/// # Arguments
+/// * `category` - Server category name for logging
+/// * `addr` - Socket address to bind to
+/// * `tls_config` - Optional TLS certificate and key paths
+/// * `shutdown_timeout` - Graceful shutdown timeout duration
+/// * `session_keep_alive` - Session keep-alive timeout (Duration::ZERO = infinite, recommended)
+/// * `register_tools` - Async function to register tools and build routers
+///
 /// Example usage:
 /// ```
 /// use kodegen_server_http::{create_http_server, RouterSet, Managers, register_tool};
@@ -63,7 +71,7 @@ where
 /// use std::time::Duration;
 ///
 /// let addr = "127.0.0.1:30437".parse()?;
-/// let handle = create_http_server("filesystem", addr, None, Duration::from_secs(30), |config, tracker| {
+/// let handle = create_http_server("filesystem", addr, None, Duration::from_secs(30), Duration::ZERO, |config, tracker| {
 ///     Box::pin(async move {
 ///         let tool_router = ToolRouter::new();
 ///         let prompt_router = PromptRouter::new();
@@ -81,7 +89,7 @@ pub async fn create_http_server<F>(
     addr: std::net::SocketAddr,
     tls_config: Option<(std::path::PathBuf, std::path::PathBuf)>,
     shutdown_timeout: Duration,
-    cli: &cli::Cli,
+    session_keep_alive: Duration,
     register_tools: F,
 ) -> Result<ServerHandle>
 where
@@ -111,13 +119,18 @@ where
     // Create session manager with production configuration
     let session_config = SessionConfig {
         channel_capacity: 16,
-        keep_alive: cli.session_keep_alive(),  // Use CLI value or default (None)
+        keep_alive: if session_keep_alive.is_zero() {
+            None  // Zero duration = infinite keep-alive
+        } else {
+            Some(session_keep_alive)
+        },
     };
 
     // Log configured keep-alive for observability
-    match session_config.keep_alive {
-        None => log::info!("Session keep-alive: infinite (no timeout)"),
-        Some(duration) => log::info!("Session keep-alive: {:?}", duration),
+    if session_keep_alive.is_zero() {
+        log::info!("Session keep-alive: infinite (no timeout)");
+    } else {
+        log::info!("Session keep-alive: {:?}", session_keep_alive);
     }
 
     let session_manager = Arc::new(LocalSessionManager {

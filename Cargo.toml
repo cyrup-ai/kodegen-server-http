@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_server_http"
-version = "0.1.8"
+version = "0.2.0"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
 license = "Apache-2.0 OR MIT"

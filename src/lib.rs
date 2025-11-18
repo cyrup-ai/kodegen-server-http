@@ -323,27 +323,39 @@ async fn wait_for_shutdown_signal() -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
-
-        let ctrl_c = tokio::signal::ctrl_c();
+        
         let mut sigterm = signal(SignalKind::terminate())?;
-        let mut sighup = signal(SignalKind::hangup())?;
-
+        let mut sigint = signal(SignalKind::interrupt())?;
+        
         tokio::select! {
-            _ = ctrl_c => {
-                log::debug!("Received SIGINT (Ctrl+C)");
-            }
             _ = sigterm.recv() => {
-                log::debug!("Received SIGTERM");
+                log::info!("Received SIGTERM, shutting down HTTP server");
             }
-            _ = sighup.recv() => {
-                log::debug!("Received SIGHUP");
+            _ = sigint.recv() => {
+                log::info!("Received SIGINT, shutting down HTTP server");
             }
         }
     }
-
-    #[cfg(not(unix))]
+    
+    #[cfg(windows)]
     {
-        tokio::signal::ctrl_c().await?;
+        use tokio::signal::windows;
+        
+        let mut ctrl_c = windows::ctrl_c()?;
+        let mut ctrl_break = windows::ctrl_break()?;
+        let mut ctrl_close = windows::ctrl_close()?;
+        
+        tokio::select! {
+            _ = ctrl_c.recv() => {
+                log::info!("Received CTRL+C, shutting down HTTP server");
+            }
+            _ = ctrl_break.recv() => {
+                log::info!("Received CTRL+BREAK, shutting down HTTP server");
+            }
+            _ = ctrl_close.recv() => {
+                log::info!("Received CTRL+CLOSE, shutting down HTTP server");
+            }
+        }
     }
 
     Ok(())

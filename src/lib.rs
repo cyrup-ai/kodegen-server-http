@@ -194,8 +194,16 @@ pub async fn run_http_server<F>(
 where
     F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
 {
-    // Initialize logging
-    env_logger::init();
+    // Initialize logging with chromiumoxide CDP error filtering
+    // Suppress internal chromiumoxide errors from outdated CDP definitions (Chromium 107)
+    // while modern Chrome browsers send newer CDP messages causing benign deserialization failures
+    // References:
+    //   - https://github.com/mattsse/chromiumoxide/issues/229
+    //   - https://github.com/mattsse/chromiumoxide/issues/167
+    env_logger::Builder::from_default_env()
+        .filter_module("chromiumoxide::handler", log::LevelFilter::Off)
+        .filter_module("chromiumoxide::conn", log::LevelFilter::Off)
+        .init();
 
     // Install rustls CryptoProvider (required for HTTPS)
     // This is idempotent: if a provider is already installed (e.g., by a parent

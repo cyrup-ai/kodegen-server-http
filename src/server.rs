@@ -171,13 +171,41 @@ where
 
         log::info!("Starting HTTP server on {protocol}://{addr}");
 
-        // Pre-bind the socket to catch errors immediately
-        log::debug!("Attempting to bind to {}", addr);
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
+        // Pre-bind the socket with SO_REUSEADDR to allow immediate port reuse
+        // This is CRITICAL for service manager integration - allows instant restarts
+        log::debug!("Creating socket for {} with reuse options", addr);
+
+        use tokio::net::TcpSocket;
+
+        // Create socket (IPv4 or IPv6 based on address)
+        let socket = if addr.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+
+        // SO_REUSEADDR: Allows binding to port in TIME_WAIT state
+        // Essential for fast restarts - without this, must wait 60+ seconds after shutdown
+        socket.set_reuseaddr(true)
+            .map_err(|e| anyhow::anyhow!("Failed to set SO_REUSEADDR: {}", e))?;
+
+        // SO_REUSEPORT: (Unix only) Allows multiple processes to bind same port
+        // Enables load balancing across multiple processes (advanced use case)
+        #[cfg(unix)]
+        socket.set_reuseport(true)
+            .map_err(|e| anyhow::anyhow!("Failed to set SO_REUSEPORT: {}", e))?;
+
+        log::debug!("Binding socket to {} with reuse flags enabled", addr);
+
+        // Bind socket to address
+        socket.bind(addr)
             .map_err(|e| anyhow::anyhow!("Failed to bind to {}: {}", addr, e))?;
-        
-        log::info!("Successfully bound to {}", addr);
+
+        // Convert to listener with backlog of 1024 (standard for HTTP servers)
+        let listener = socket.listen(1024)
+            .map_err(|e| anyhow::anyhow!("Failed to listen on {}: {}", addr, e))?;
+
+        log::info!("Successfully bound to {} with SO_REUSEADDR enabled", addr);
 
         // Allocate timeout budget (70% HTTP drain, 30% cleanup)
         let http_drain_timeout = shutdown_timeout.mul_f32(0.7);

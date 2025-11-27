@@ -11,6 +11,8 @@ use std::time::Duration;
 
 pub mod cli;
 pub mod managers;
+pub mod memory;
+pub mod monitor;
 pub mod registration;
 pub mod server;
 
@@ -65,24 +67,32 @@ where
 /// * `register_tools` - Async function to register tools and build routers
 ///
 /// Example usage:
-/// ```
-/// use kodegen_server_http::{create_http_server, RouterSet, Managers, register_tool};
-/// use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
-/// use std::time::Duration;
-///
+/// ```no_run
+/// # use anyhow::Result;
+/// # use kodegen_server_http::{create_http_server, RouterSet, Managers};
+/// # use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
+/// # use std::time::Duration;
+/// #
+/// # #[tokio::main]
+/// # async fn main() -> Result<()> {
 /// let addr = "127.0.0.1:30437".parse()?;
-/// let handle = create_http_server("filesystem", addr, None, Duration::from_secs(30), Duration::ZERO, |config, tracker| {
-///     Box::pin(async move {
-///         let tool_router = ToolRouter::new();
-///         let prompt_router = PromptRouter::new();
-///         let managers = Managers::new();
-///         // Register tools...
-///         Ok(RouterSet::new(tool_router, prompt_router, managers))
-///     })
-/// }).await?;
+/// let handle = create_http_server(
+///     "filesystem", addr, None,
+///     Duration::from_secs(30), Duration::ZERO,
+///     |config, tracker| {
+///         Box::pin(async move {
+///             let tool_router = ToolRouter::new();
+///             let prompt_router = PromptRouter::new();
+///             let managers = Managers::new();
+///             Ok(RouterSet::new(tool_router, prompt_router, managers))
+///         })
+///     }
+/// ).await?;
 ///
 /// // Server is now running in background tasks
 /// // handle.cancel() to shutdown
+/// # Ok(())
+/// # }
 /// ```
 pub async fn create_http_server<F>(
     category: &str,
@@ -165,25 +175,51 @@ where
 /// tool registration via callback, HTTP server setup, graceful shutdown.
 ///
 /// Example usage in category server main.rs:
-/// ```
-/// use kodegen_server_http::{run_http_server, RouterSet, Managers, register_tool};
-/// use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
-///
+/// ```no_run
+/// # use anyhow::Result;
+/// # use kodegen_server_http::{run_http_server, RouterSet, Managers, register_tool};
+/// # use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
+/// # use kodegen_mcp_tool::{Tool, ToolExecutionContext};
+/// # use kodegen_config_manager::ConfigManager;
+/// # use kodegen_mcp_tool::error::McpError;
+/// # use rmcp::model::{Content, PromptArgument, PromptMessage};
+/// # use serde_json::Value;
+/// #
+/// # #[derive(Clone)]
+/// # struct ReadFileTool { config: ConfigManager }
+/// # impl ReadFileTool {
+/// #     fn new(_limit: usize, config: ConfigManager) -> Self { Self { config } }
+/// # }
+/// # impl Tool for ReadFileTool {
+/// #     type Args = Value;
+/// #     type PromptArgs = Value;
+/// #     fn name() -> &'static str { "fs_read_file" }
+/// #     fn description() -> &'static str { "Read file" }
+/// #     async fn execute(&self, _args: Self::Args, _ctx: ToolExecutionContext) -> Result<Vec<Content>, McpError> {
+/// #         Ok(vec![])
+/// #     }
+/// #     fn prompt_arguments() -> Vec<PromptArgument> { vec![] }
+/// #     async fn prompt(&self, _args: Self::PromptArgs) -> Result<Vec<PromptMessage>, McpError> {
+/// #         Ok(vec![])
+/// #     }
+/// # }
+/// #
 /// #[tokio::main]
 /// async fn main() -> Result<()> {
 ///     run_http_server("filesystem", |config, tracker| {
-///         let tool_router = ToolRouter::new();
-///         let prompt_router = PromptRouter::new();
-///         let managers = Managers::new();
-///         
-///         // Register tools
-///         let (tool_router, prompt_router) = register_tool(
-///             tool_router,
-///             prompt_router,
-///             ReadFileTool::new(config.clone()),
-///         );
-///         
-///         Ok(RouterSet::new(tool_router, prompt_router, managers))
+///         let config = config.clone();
+///         Box::pin(async move {
+///             let tool_router = ToolRouter::new();
+///             let prompt_router = PromptRouter::new();
+///             let managers = Managers::new();
+///
+///             let (tool_router, prompt_router) = register_tool(
+///                 tool_router, prompt_router,
+///                 ReadFileTool::new(2000, config),
+///             );
+///
+///             Ok(RouterSet::new(tool_router, prompt_router, managers))
+///         })
 ///     }).await
 /// }
 /// ```

@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_server_http"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
 license = "Apache-2.0 OR MIT"
@@ -22,6 +22,9 @@ kodegen_config_manager = { version = "0.3" }
 kodegen_utils = { version = "0.3" }
 kodegen_mcp_tool = { version = "0.3" }
 
+# Cross-platform process memory tracking
+sysinfo = "0.37"
+
 # MCP SDK with Streamable HTTP feature (NOT sse-server!)
 rmcp = { version = "0.9", features = ["server", "transport-streamable-http-server"] }
 
@@ -32,8 +35,8 @@ tokio-util = "0.7"
 # HTTP stack
 axum = "0.8"
 hyper = "1"
-tower = "0.4"
-tower-http = { version = "0.5", features = ["cors", "trace"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2"

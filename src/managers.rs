@@ -43,9 +43,29 @@ impl Managers {
     /// Register a component that needs shutdown
     ///
     /// Example usage in category server:
-    /// ```
-    /// let browser_manager = Arc::new(BrowserManager::new());
-    /// managers.register(browser_manager.clone());
+    /// ```no_run
+    /// # use kodegen_server_http::{Managers, ShutdownHook};
+    /// # use std::pin::Pin;
+    /// # use std::future::Future;
+    /// # use anyhow::Result;
+    /// #
+    /// # struct BrowserManager;
+    /// # impl BrowserManager {
+    /// #     fn global() -> Self { Self }
+    /// # }
+    /// # impl ShutdownHook for BrowserManager {
+    /// #     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    /// #         Box::pin(async { Ok(()) })
+    /// #     }
+    /// # }
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() -> anyhow::Result<()> {
+    /// # let managers = Managers::new();
+    /// let browser_manager = BrowserManager::global();
+    /// managers.register(browser_manager).await;
+    /// # Ok(())
+    /// # }
     /// ```
     pub async fn register<H: ShutdownHook + 'static>(&self, hook: H) {
         self.shutdown_hooks.lock().await.push(Arc::new(hook));
@@ -58,9 +78,36 @@ impl Managers {
     /// later (which may depend on earlier managers) shut down first.
     ///
     /// Example:
-    /// ```
-    /// managers.register(database_pool);  // Shuts down last
-    /// managers.register(cache_manager);  // Shuts down first
+    /// ```no_run
+    /// # use kodegen_server_http::{Managers, ShutdownHook};
+    /// # use std::pin::Pin;
+    /// # use std::future::Future;
+    /// # use anyhow::Result;
+    /// #
+    /// # struct DatabasePool;
+    /// # impl ShutdownHook for DatabasePool {
+    /// #     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    /// #         Box::pin(async { Ok(()) })
+    /// #     }
+    /// # }
+    /// #
+    /// # struct CacheManager;
+    /// # impl ShutdownHook for CacheManager {
+    /// #     fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    /// #         Box::pin(async { Ok(()) })
+    /// #     }
+    /// # }
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<()> {
+    /// # let managers = Managers::new();
+    /// # let database_pool = DatabasePool;
+    /// # let cache_manager = CacheManager;
+    /// // Managers shut down in LIFO order (reverse registration)
+    /// managers.register(database_pool).await;  // Shuts down last
+    /// managers.register(cache_manager).await;  // Shuts down first
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// Called automatically by core server before exit.

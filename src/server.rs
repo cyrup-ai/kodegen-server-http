@@ -20,9 +20,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
-use axum::Router;
+use axum::{response::Json, routing::get, Router};
+use serde::Serialize;
 use tower::Service;
 use tower_http::cors::CorsLayer;
 use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -90,6 +91,24 @@ fn build_rustls_config(
     Ok(Arc::new(config))
 }
 
+/// Health check response returned by /mcp/health endpoint
+#[derive(Serialize)]
+struct HealthResponse {
+    timestamp: String,
+    status: HealthStatus,
+    requests_processed: u64,
+    memory_used: u64,
+}
+
+/// Health status enumeration
+#[derive(Serialize)]
+enum HealthStatus {
+    #[serde(rename = "HEALTHY")]
+    Healthy,
+    #[serde(rename = "UNHEALTHY")]
+    Unhealthy,
+}
+
 /// MCP Server that serves tools via Streamable HTTP transport
 ///
 /// Generic over `SessionManager` trait to enable pluggable session backends.
@@ -104,6 +123,7 @@ where
     config_manager: kodegen_config_manager::ConfigManager,
     managers: std::sync::Arc<crate::managers::Managers>,
     active_requests: Arc<AtomicUsize>,
+    requests_processed: Arc<AtomicU64>,
     session_manager: Arc<SM>,
 }
 
@@ -121,6 +141,7 @@ where
             config_manager: self.config_manager.clone(),
             managers: self.managers.clone(),
             active_requests: self.active_requests.clone(),
+            requests_processed: self.requests_processed.clone(),
             session_manager: self.session_manager.clone(),
         }
     }
@@ -146,8 +167,29 @@ where
             config_manager,
             managers: std::sync::Arc::new(managers),
             active_requests: Arc::new(AtomicUsize::new(0)),
+            requests_processed: Arc::new(AtomicU64::new(0)),
             session_manager,
         }
+    }
+
+    /// Handle health check requests
+    ///
+    /// Returns JSON response with timestamp, status, requests processed count, and memory usage.
+    async fn handle_health(&self) -> Json<HealthResponse> {
+        use chrono::Utc;
+        let memory_used = crate::memory::get_memory_used().unwrap_or(0);
+        let status = if memory_used > 0 {
+            HealthStatus::Healthy
+        } else {
+            HealthStatus::Unhealthy
+        };
+
+        Json(HealthResponse {
+            timestamp: Utc::now().to_rfc3339(),
+            status,
+            requests_processed: self.requests_processed.load(Ordering::SeqCst),
+            memory_used,
+        })
     }
 
     /// Create and serve HTTP server with optional TLS configuration
@@ -238,6 +280,12 @@ where
             }).await;
         }
 
+        // Spawn background memory monitor
+        crate::monitor::spawn_memory_monitor(
+            self.requests_processed.clone(),
+            ct.clone(),
+        );
+
         // Create service factory closure
         let service_factory = {
             let server = self.clone();
@@ -254,8 +302,18 @@ where
             },
         );
 
+        // Create health handler closure
+        let health_handler = {
+            let server = self.clone();
+            move || {
+                let server = server.clone();
+                async move { server.handle_health().await }
+            }
+        };
+
         // Build Axum router with CORS
         let router = Router::new()
+            .route("/mcp/health", get(health_handler))
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
 
@@ -497,7 +555,10 @@ where
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let tool_name = request.name.clone();
-        
+
+        // Increment total tool calls counter
+        self.requests_processed.fetch_add(1, Ordering::SeqCst);
+
         // Track this request handler (guard ensures decrement even on panic)
         let _guard = RequestGuard::new(self.active_requests.clone());
         

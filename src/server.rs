@@ -355,7 +355,7 @@ where
         // Build Axum router with CORS
         let router = Router::new()
             .route("/mcp/health", get(health_handler))
-            .route("/mcp/connection/:connection_id", delete(connection_delete_handler))
+            .route("/mcp/connection/{connection_id}", delete(connection_delete_handler))
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
 

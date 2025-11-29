@@ -22,7 +22,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
-use axum::{response::Json, routing::get, Router};
+use axum::{extract::Path, response::Json, routing::{delete, get}, Router};
 use serde::Serialize;
 use tower::Service;
 use tower_http::cors::CorsLayer;
@@ -125,6 +125,7 @@ where
     active_requests: Arc<AtomicUsize>,
     requests_processed: Arc<AtomicU64>,
     session_manager: Arc<SM>,
+    connection_cleanup: Option<crate::ConnectionCleanupFn>,
 }
 
 // Manual Clone implementation for HttpServer
@@ -143,6 +144,7 @@ where
             active_requests: self.active_requests.clone(),
             requests_processed: self.requests_processed.clone(),
             session_manager: self.session_manager.clone(),
+            connection_cleanup: self.connection_cleanup.clone(),
         }
     }
 }
@@ -159,6 +161,7 @@ where
         config_manager: kodegen_config_manager::ConfigManager,
         managers: crate::managers::Managers,
         session_manager: Arc<SM>,
+        connection_cleanup: Option<crate::ConnectionCleanupFn>,
     ) -> Self {
         Self {
             tool_router,
@@ -169,6 +172,7 @@ where
             active_requests: Arc::new(AtomicUsize::new(0)),
             requests_processed: Arc::new(AtomicU64::new(0)),
             session_manager,
+            connection_cleanup,
         }
     }
 
@@ -190,6 +194,31 @@ where
             requests_processed: self.requests_processed.load(Ordering::SeqCst),
             memory_used,
         })
+    }
+
+    /// Handle connection cleanup notification
+    ///
+    /// Called when a connection drops to cleanup connection-specific resources.
+    async fn handle_connection_delete(&self, connection_id: String) {
+        use std::time::Instant;
+        
+        let start = Instant::now();
+        
+        log::info!("DELETE /mcp/connection/{}", connection_id);
+        
+        // Invoke cleanup handler if registered
+        if let Some(cleanup) = &self.connection_cleanup {
+            cleanup(connection_id.clone()).await;
+        } else {
+            log::debug!("No cleanup handler registered for this server");
+        }
+        
+        let elapsed = start.elapsed();
+        log::info!(
+            "Connection {} cleanup completed in {:?}",
+            connection_id,
+            elapsed
+        );
     }
 
     /// Create and serve HTTP server with optional TLS configuration
@@ -311,9 +340,22 @@ where
             }
         };
 
+        // Create connection delete handler closure
+        let connection_delete_handler = {
+            let server = self.clone();
+            move |Path(connection_id): Path<String>| {
+                let server = server.clone();
+                async move {
+                    server.handle_connection_delete(connection_id).await;
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }
+        };
+
         // Build Axum router with CORS
         let router = Router::new()
             .route("/mcp/health", get(health_handler))
+            .route("/mcp/connection/:connection_id", delete(connection_delete_handler))
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
 

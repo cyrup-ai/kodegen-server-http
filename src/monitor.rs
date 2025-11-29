@@ -45,14 +45,22 @@ pub fn spawn_memory_monitor(
                                 elapsed,
                                 requests_delta
                             );
-                        }
-                    }
 
-                    last_snapshot = Some(MemorySnapshot {
-                        memory,
-                        requests,
-                        timestamp: now,
-                    });
+                            // Update snapshot ONLY when we log
+                            last_snapshot = Some(MemorySnapshot {
+                                memory,
+                                requests,
+                                timestamp: now,
+                            });
+                        }
+                    } else {
+                        // First snapshot
+                        last_snapshot = Some(MemorySnapshot {
+                            memory,
+                            requests,
+                            timestamp: now,
+                        });
+                    }
                 }
             }
         }

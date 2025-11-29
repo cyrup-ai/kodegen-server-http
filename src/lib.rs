@@ -21,6 +21,16 @@ pub use managers::{Managers, ShutdownHook};
 pub use registration::{register_tool, register_tool_arc};
 pub use server::{HttpServer, ServerHandle, ShutdownError};
 
+/// Type alias for async connection cleanup callback
+///
+/// Called when a connection drops to cleanup connection-specific resources.
+/// The callback receives the connection_id and performs async cleanup.
+pub type ConnectionCleanupFn = Arc<
+    dyn Fn(String) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> 
+    + Send 
+    + Sync
+>;
+
 /// Container for routers and managers
 ///
 /// Category servers build this and pass to run_http_server().
@@ -31,6 +41,8 @@ where
     pub tool_router: ToolRouter<S>,
     pub prompt_router: PromptRouter<S>,
     pub managers: Managers,
+    /// Optional async cleanup callback invoked when connection drops
+    pub connection_cleanup: Option<ConnectionCleanupFn>,
 }
 
 impl<S> RouterSet<S>
@@ -46,6 +58,7 @@ where
             tool_router,
             prompt_router,
             managers,
+            connection_cleanup: None,
         }
     }
 }
@@ -156,6 +169,7 @@ where
         config_manager,
         routers.managers,
         session_manager,
+        routers.connection_cleanup,
     );
 
     let protocol = if tls_config.is_some() { "https" } else { "http" };
@@ -294,6 +308,7 @@ where
         config_manager,
         routers.managers,
         session_manager,
+        routers.connection_cleanup,
     );
 
     // Start server

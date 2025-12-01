@@ -183,6 +183,120 @@ where
     Ok(handle)
 }
 
+/// Create HTTP server using a pre-bound listener (TOCTOU-safe variant)
+///
+/// This is identical to `create_http_server()` except it accepts a pre-bound
+/// TcpListener instead of a SocketAddr. Use this when port cleanup is required
+/// to eliminate TOCTOU race conditions.
+///
+/// # Arguments
+/// * `category` - Server category name (for logging and instance ID)
+/// * `listener` - Pre-bound TcpListener (port already reserved)
+/// * `tls_config` - Optional (cert_path, key_path) for HTTPS
+/// * `shutdown_timeout` - Graceful shutdown timeout
+/// * `session_keep_alive` - Session keep-alive duration (zero = infinite)
+/// * `register_tools` - Async closure to register tools and prompts
+///
+/// # Returns
+/// ServerHandle for graceful shutdown, or error if startup fails
+///
+/// # Example
+/// ```rust
+/// let listener = cleanup_and_reserve_port(30438).await?;
+/// 
+/// let handle = create_http_server_with_listener(
+///     "filesystem",
+///     listener,
+///     None, // no TLS
+///     Duration::from_secs(30),
+///     Duration::ZERO,
+///     |config, tracker| {
+///         Box::pin(async move {
+///             // Register tools...
+///             Ok(RouterSet { tool_router, prompt_router, managers })
+///         })
+///     }
+/// ).await?;
+/// ```
+pub async fn create_http_server_with_listener<F>(
+    category: &str,
+    listener: tokio::net::TcpListener,
+    tls_config: Option<(std::path::PathBuf, std::path::PathBuf)>,
+    shutdown_timeout: Duration,
+    session_keep_alive: Duration,
+    register_tools: F,
+) -> Result<ServerHandle>
+where
+    F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
+{
+    // Install rustls CryptoProvider (idempotent)
+    if rustls::crypto::ring::default_provider().install_default().is_err() {
+        log::debug!("rustls crypto provider already installed");
+    }
+
+    // Get address from pre-bound listener
+    let addr = listener.local_addr()
+        .map_err(|e| anyhow::anyhow!("Failed to get listener address: {}", e))?;
+
+    // Initialize shared components
+    let config_manager = ConfigManager::new();
+    config_manager.init().await?;
+
+    let timestamp = chrono::Utc::now();
+    let pid = std::process::id();
+    let instance_id = format!("{}-{}", timestamp.format("%Y%m%d-%H%M%S-%9f"), pid);
+    let usage_tracker = UsageTracker::new(format!("{}-{}", category, instance_id));
+
+    // Initialize global tool history tracking
+    log::debug!("Initializing global tool history for instance: {}", instance_id);
+    kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
+
+    // Build routers using provided async registration function
+    let routers = register_tools(&config_manager, &usage_tracker).await?;
+
+    // Create session manager with production configuration
+    let session_config = SessionConfig {
+        channel_capacity: 16,
+        keep_alive: if session_keep_alive.is_zero() {
+            None  // Zero duration = infinite keep-alive
+        } else {
+            Some(session_keep_alive)
+        },
+    };
+
+    // Log configured keep-alive
+    if session_keep_alive.is_zero() {
+        log::info!("Session keep-alive: infinite (no timeout)");
+    } else {
+        log::info!("Session keep-alive: {:?}", session_keep_alive);
+    }
+
+    let session_manager = Arc::new(LocalSessionManager {
+        sessions: Default::default(),
+        session_config,
+    });
+
+    // Create HTTP server
+    let server = HttpServer::new(
+        routers.tool_router,
+        routers.prompt_router,
+        usage_tracker,
+        config_manager,
+        routers.managers,
+        session_manager,
+        routers.connection_cleanup,
+    );
+
+    let protocol = if tls_config.is_some() { "https" } else { "http" };
+    log::info!("Starting {} HTTP server on {}://{} (pre-bound listener)", category, protocol, addr);
+
+    // Start server with pre-bound listener (eliminates TOCTOU race)
+    let handle = server.serve_with_listener(listener, tls_config, shutdown_timeout).await?;
+
+    log::info!("{} server started successfully on {}", category, addr);
+    Ok(handle)
+}
+
 /// Main entry point for category HTTP servers
 ///
 /// Handles all boilerplate: CLI parsing, config initialization,

@@ -573,6 +573,282 @@ where
 
         Ok(ServerHandle::new(ct, completion_rx))
     }
+
+    /// Create and serve HTTP server using a pre-bound listener (TOCTOU-safe)
+    ///
+    /// This variant accepts a TcpListener that's already bound to an address.
+    /// Use this to eliminate TOCTOU races when port cleanup is required before startup.
+    ///
+    /// The listener is used directly for accept() calls, preventing any gap where
+    /// another process could claim the port.
+    ///
+    /// # Arguments
+    /// * `listener` - Pre-bound TcpListener (port already reserved)
+    /// * `tls_config` - Optional (cert_path, key_path) for HTTPS
+    /// * `shutdown_timeout` - Graceful shutdown timeout
+    ///
+    /// # Returns
+    /// ServerHandle for graceful shutdown coordination
+    ///
+    /// # Example
+    /// ```rust
+    /// // Reserve port with cleanup
+    /// let listener = cleanup_and_reserve_port(30438).await?;
+    ///
+    /// // Start server with pre-bound listener (no race window)
+    /// let handle = server.serve_with_listener(listener, tls_config, timeout).await?;
+    /// ```
+    pub async fn serve_with_listener(
+        self,
+        listener: tokio::net::TcpListener,
+        tls_config: Option<(PathBuf, PathBuf)>,
+        shutdown_timeout: Duration,
+    ) -> Result<ServerHandle>
+    where
+        SM: std::any::Any + 'static,
+    {
+        use tokio::sync::oneshot;
+        use tokio_util::sync::CancellationToken;
+
+        let managers = self.managers.clone();
+        let protocol = if tls_config.is_some() { "https" } else { "http" };
+        
+        // Get the address the listener is bound to
+        let addr = listener.local_addr()
+            .map_err(|e| anyhow::anyhow!("Failed to get listener address: {}", e))?;
+
+        log::info!("Starting HTTP server on {protocol}://{addr} (using pre-bound listener)");
+
+        // Allocate timeout budget (70% HTTP drain, 30% cleanup)
+        let http_drain_timeout = shutdown_timeout.mul_f32(0.7);
+        let manager_buffer = shutdown_timeout.mul_f32(0.3);
+        
+        log::info!(
+            "Shutdown timeout budget: total={:?}, HTTP drain={:?}, cleanup buffer={:?}",
+            shutdown_timeout,
+            http_drain_timeout,
+            manager_buffer
+        );
+
+        // Create completion channel for graceful shutdown signaling
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let ct = CancellationToken::new();
+
+        // Register session manager for graceful shutdown (LocalSessionManager only)
+        let session_manager = self.session_manager.clone();
+        let session_manager_any: &dyn std::any::Any = &*session_manager;
+        if session_manager_any.downcast_ref::<LocalSessionManager>().is_some() {
+            let local_sm: Arc<LocalSessionManager> = unsafe {
+                std::mem::transmute(session_manager.clone())
+            };
+            managers.register(LocalSessionManagerHook {
+                session_manager: local_sm,
+            }).await;
+        }
+
+        // Spawn background memory monitor
+        crate::monitor::spawn_memory_monitor(
+            self.requests_processed.clone(),
+            ct.clone(),
+        );
+
+        // Create service factory closure
+        let service_factory = {
+            let server = self.clone();
+            move || Ok::<_, std::io::Error>(server.clone())
+        };
+
+        // Create StreamableHttpService
+        let http_service = StreamableHttpService::new(
+            service_factory,
+            session_manager,
+            StreamableHttpServerConfig {
+                stateful_mode: true,
+                sse_keep_alive: Some(Duration::from_secs(15)),
+            },
+        );
+
+        // Create health handler closure
+        let health_handler = {
+            let server = self.clone();
+            move || {
+                let server = server.clone();
+                async move { server.handle_health().await }
+            }
+        };
+
+        // Create connection delete handler closure
+        let connection_delete_handler = {
+            let server = self.clone();
+            move |Path(connection_id): Path<String>| {
+                let server = server.clone();
+                async move {
+                    server.handle_connection_delete(connection_id).await;
+                    axum::http::StatusCode::NO_CONTENT
+                }
+            }
+        };
+
+        // Build Axum router with CORS
+        let router = Router::new()
+            .route("/mcp/health", get(health_handler))
+            .route("/mcp/connection/{connection_id}", delete(connection_delete_handler))
+            .nest_service("/mcp", http_service)
+            .layer(CorsLayer::permissive());
+
+        // Spawn server with or without TLS
+        let server_task = if let Some((cert_path, key_path)) = tls_config {
+            log::info!("Loading TLS certificate from: {cert_path:?}");
+            
+            let rustls_config = build_rustls_config(cert_path, key_path)?;
+            let tls_acceptor = TlsAcceptor::from(rustls_config);
+            let ct_for_tls = ct.clone();
+            let active_requests = self.active_requests.clone();
+            
+            tokio::spawn(async move {
+                loop {
+                    // Accept TCP connection from pre-bound listener
+                    let (tcp_stream, remote_addr) = tokio::select! {
+                        _ = ct_for_tls.cancelled() => break,
+                        result = listener.accept() => {
+                            match result {
+                                Ok(conn) => conn,
+                                Err(e) => {
+                                    log::error!("Failed to accept connection: {e}");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    
+                    // Clone for task
+                    let tls_acceptor = tls_acceptor.clone();
+                    let router = router.clone();
+                    let active_requests = active_requests.clone();
+                    
+                    // Spawn connection handler (same as serve_with_tls)
+                    tokio::spawn(async move {
+                        let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                            Ok(stream) => stream,
+                            Err(e) => {
+                                log::error!("TLS handshake failed from {remote_addr}: {e}");
+                                return;
+                            }
+                        };
+                        
+                        let io = TokioIo::new(tls_stream);
+                        let tower_service = router.clone();
+                        let hyper_service = hyper::service::service_fn(move |request| {
+                            tower_service.clone().call(request)
+                        });
+                        
+                        let _guard = RequestGuard::new(active_requests.clone());
+                        
+                        if let Err(e) = hyper_util::server::conn::auto::Builder::new(TokioExecutor::new())
+                            .serve_connection_with_upgrades(io, hyper_service)
+                            .await
+                        {
+                            log::debug!("Connection error from {remote_addr}: {e}");
+                        }
+                    });
+                }
+            })
+        } else {
+            // HTTP (no TLS) - use axum::serve with pre-bound listener
+            let ct_for_http = ct.clone();
+            tokio::spawn(async move {
+                if let Err(e) = axum::serve(listener, router)
+                    .with_graceful_shutdown(async move {
+                        ct_for_http.cancelled().await;
+                    })
+                    .await
+                {
+                    log::error!("HTTP server error: {e}");
+                }
+            })
+        };
+
+        // Spawn monitor task for graceful shutdown (identical pattern to serve_with_tls)
+        let ct_clone = ct.clone();
+        let active_requests = self.active_requests.clone();
+
+        tokio::spawn(async move {
+            tokio::pin!(server_task);
+            
+            let early_exit = tokio::select! {
+                _ = ct_clone.cancelled() => {
+                    log::debug!("Cancellation triggered, initiating graceful shutdown");
+                    
+                    let server_shutdown_timeout = http_drain_timeout + Duration::from_secs(5);
+                    match tokio::time::timeout(server_shutdown_timeout, &mut server_task).await {
+                        Ok(Ok(_)) => {
+                            log::debug!("HTTP server shutdown complete");
+                        }
+                        Ok(Err(e)) => {
+                            log::error!("HTTP server task panicked during shutdown: {:?}", e);
+                        }
+                        Err(_) => {
+                            log::error!("HTTP server shutdown timeout ({:?})", server_shutdown_timeout);
+                        }
+                    }
+                    
+                    false
+                }
+                
+                result = &mut server_task => {
+                    log::error!("HTTP server task exited unexpectedly");
+                    match result {
+                        Ok(_) => log::error!("Server exited normally without cancellation"),
+                        Err(e) => log::error!("Server task panicked: {:?}", e),
+                    }
+                    true
+                }
+            };
+
+            // Wait for all in-flight request handlers to complete
+            if early_exit {
+                log::warn!("Server panicked - draining in-flight requests before cleanup");
+            } else {
+                log::info!("Draining in-flight request handlers before manager shutdown");
+            }
+            
+            let drain_timeout = Duration::from_secs(30);
+            let drain_start = std::time::Instant::now();
+            
+            loop {
+                let active = active_requests.load(Ordering::SeqCst);
+                
+                if active == 0 {
+                    log::info!("All request handlers completed successfully");
+                    break;
+                }
+                
+                if drain_start.elapsed() > drain_timeout {
+                    log::warn!(
+                        "Request drain timeout after {:?}, {} requests still active",
+                        drain_timeout,
+                        active
+                    );
+                    break;
+                }
+                
+                log::debug!("Waiting for {} active request handlers...", active);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            // Shut down managers
+            log::debug!("Starting manager shutdown");
+            if let Err(e) = managers.shutdown().await {
+                log::error!("Manager shutdown error: {e}");
+            }
+            log::debug!("Manager shutdown complete");
+
+            // Signal completion
+            let _ = completion_tx.send(());
+        });
+
+        Ok(ServerHandle::new(ct, completion_rx))
+    }
 }
 
 impl<SM> ServerHandler for HttpServer<SM>

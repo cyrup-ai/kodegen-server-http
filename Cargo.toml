@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_server_http"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
 license = "Apache-2.0 OR MIT"
@@ -26,7 +26,7 @@ kodegen_mcp_tool = { version = "0.5" }
 sysinfo = "0.37"
 
 # MCP SDK with Streamable HTTP feature (NOT sse-server!)
-rmcp = { version = "0.9", features = ["server", "transport-streamable-http-server"] }
+rmcp = { version = "0.10", features = ["server", "transport-streamable-http-server"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

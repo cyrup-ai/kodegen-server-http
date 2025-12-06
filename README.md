@@ -31,20 +31,6 @@ This library is designed to be used by category servers (filesystem, browser, da
 - 🔄 **Stateful Sessions** - Support for stateful HTTP sessions with SSE keep-alive
 - 🌐 **CORS Enabled** - Permissive CORS for cross-origin requests
 
-## Installation
-
-Add to your `Cargo.toml`:
-
-```toml
-[dependencies]
-kodegen-server-http = "0.1"
-kodegen-tools-config = "0.1"
-kodegen-utils = "0.1"
-kodegen-mcp-tool = "0.1"
-rmcp = { version = "0.9", features = ["server", "transport-streamable-http-server"] }
-tokio = { version = "1", features = ["full"] }
-anyhow = "1"
-```
 
 ## Quick Start
 

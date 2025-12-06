@@ -1,4 +1,4 @@
-use kodegen_mcp_tool::Tool;
+use kodegen_mcp_schema::Tool;
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ use log;
 /// # use kodegen_server_http::register_tool;
 /// # use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 /// # use kodegen_config_manager::ConfigManager;
-/// # use kodegen_mcp_tool::{Tool, ToolExecutionContext};
-/// # use kodegen_mcp_tool::error::McpError;
+/// # use kodegen_mcp_schema::{Tool, ToolExecutionContext};
+/// # use kodegen_mcp_schema::McpError;
 /// # use rmcp::model::{Content, PromptArgument, PromptMessage};
 /// # use serde_json::Value;
 /// #
@@ -81,8 +81,8 @@ where
 /// # use std::sync::Arc;
 /// # use kodegen_server_http::register_tool_arc;
 /// # use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
-/// # use kodegen_mcp_tool::{Tool, ToolExecutionContext};
-/// # use kodegen_mcp_tool::error::McpError;
+/// # use kodegen_mcp_schema::{Tool, ToolExecutionContext};
+/// # use kodegen_mcp_schema::McpError;
 /// # use rmcp::model::{Content, PromptArgument, PromptMessage};
 /// # use serde_json::Value;
 /// #

@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_server_http"
-version = "0.6.0"
+version = "0.8.0"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
 license = "Apache-2.0 OR MIT"
@@ -18,9 +18,9 @@ keywords = [
 
 [dependencies]
 # Internal dependencies
-kodegen_config_manager = { version = "0.6" }
-kodegen_utils = { version = "0.6" }
-kodegen_mcp_tool = { version = "0.6" }
+kodegen_config_manager = { version = "0.8" }
+kodegen_utils = { version = "0.8" }
+kodegen_mcp_schema = { version = "0.8" }
 
 # Cross-platform process memory tracking
 sysinfo = "0.37"
@@ -54,7 +54,7 @@ log = "0.4"
 chrono = "0.4"
 
 # TLS
-rustls = "0.23"
+rustls = { version = "0.23", features = ["ring"] }
 
 # Serialization
 serde = "1"

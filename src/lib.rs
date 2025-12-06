@@ -134,7 +134,7 @@ where
 
     // Initialize global tool history tracking
     log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
-    kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
+    kodegen_mcp_schema::tool::tool_history::init_global_history(instance_id).await;
 
     // Build routers using provided async registration function
     let routers = register_tools(&config_manager, &usage_tracker).await?;
@@ -249,7 +249,7 @@ where
 
     // Initialize global tool history tracking
     log::debug!("Initializing global tool history for instance: {}", instance_id);
-    kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
+    kodegen_mcp_schema::tool::tool_history::init_global_history(instance_id).await;
 
     // Build routers using provided async registration function
     let routers = register_tools(&config_manager, &usage_tracker).await?;
@@ -307,9 +307,9 @@ where
 /// # use anyhow::Result;
 /// # use kodegen_server_http::{run_http_server, RouterSet, Managers, register_tool};
 /// # use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
-/// # use kodegen_mcp_tool::{Tool, ToolExecutionContext};
+/// # use kodegen_mcp_schema::{Tool, ToolExecutionContext};
 /// # use kodegen_config_manager::ConfigManager;
-/// # use kodegen_mcp_tool::error::McpError;
+/// # use kodegen_mcp_schema::McpError;
 /// # use rmcp::model::{Content, PromptArgument, PromptMessage};
 /// # use serde_json::Value;
 /// #
@@ -358,15 +358,23 @@ pub async fn run_http_server<F>(
 where
     F: FnOnce(&ConfigManager, &UsageTracker) -> Pin<Box<dyn Future<Output = Result<RouterSet<HttpServer>>> + Send>>,
 {
-    // Initialize logging with chromiumoxide CDP error filtering
+    // Initialize logging with chromiumoxide CDP error filtering and tantivy spam reduction
     // Suppress internal chromiumoxide errors from outdated CDP definitions (Chromium 107)
     // while modern Chrome browsers send newer CDP messages causing benign deserialization failures
     // References:
     //   - https://github.com/mattsse/chromiumoxide/issues/229
     //   - https://github.com/mattsse/chromiumoxide/issues/167
+    //
+    // Suppress tantivy internal indexer INFO logs (commit, segment management, file watching)
+    // These are noisy implementation details that spam logs during crawls (10+ messages per page)
     env_logger::Builder::from_default_env()
         .filter_module("chromiumoxide::handler", log::LevelFilter::Off)
         .filter_module("chromiumoxide::conn", log::LevelFilter::Off)
+        .filter_module("tantivy::indexer::index_writer", log::LevelFilter::Warn)
+        .filter_module("tantivy::indexer::prepared_commit", log::LevelFilter::Warn)
+        .filter_module("tantivy::indexer::segment_updater", log::LevelFilter::Warn)
+        .filter_module("tantivy::directory::managed_directory", log::LevelFilter::Warn)
+        .filter_module("tantivy::directory::file_watcher", log::LevelFilter::Warn)
         .init();
 
     // Install rustls CryptoProvider (required for HTTPS)
@@ -392,7 +400,7 @@ where
 
     // Initialize global tool history tracking
     log::debug!("Initializing global tool history tracking for instance: {}", instance_id);
-    kodegen_mcp_tool::tool_history::init_global_history(instance_id).await;
+    kodegen_mcp_schema::tool::tool_history::init_global_history(instance_id).await;
 
     // Build routers using provided async registration function
     let routers = register_tools(&config_manager, &usage_tracker).await?;

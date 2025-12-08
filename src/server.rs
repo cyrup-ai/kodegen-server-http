@@ -1,5 +1,7 @@
 use anyhow::Result;
-use kodegen_utils::usage_tracker::UsageTracker;
+use crate::usage_tracker::{UsageTracker, UsageStats};
+use crate::tool_history::ToolHistory;
+use kodegen_mcp_schema::tool::tool_history::ToolCallRecord;
 use thiserror::Error;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -109,6 +111,153 @@ enum HealthStatus {
     Unhealthy,
 }
 
+/// Server identity and configuration details
+#[derive(Clone)]
+pub struct ServerIdentity {
+    pub category: String,
+    pub instance_id: String,
+    pub port: u16,
+}
+
+/// Usage statistics response returned by /mcp/stats endpoint
+#[derive(Serialize)]
+struct StatsResponse {
+    category: String,
+    connection_id: String,
+    stats: UsageStats,
+    timestamp: String,
+}
+
+/// Tool history response returned by /mcp/history endpoint
+#[derive(Serialize)]
+struct HistoryResponse {
+    category: String,
+    connection_id: String,
+    history: Vec<ToolCallRecord>,
+    timestamp: String,
+}
+
+/// Builder for constructing HttpServer with immutable builder pattern
+///
+/// Provides a fluent API for setting HttpServer fields with compile-time validation.
+/// All required fields must be set before calling build().
+pub struct HttpServerBuilder<SM = LocalSessionManager>
+where
+    SM: SessionManager,
+{
+    server_identity: Option<ServerIdentity>,
+    tool_router: Option<ToolRouter<HttpServer<SM>>>,
+    prompt_router: Option<PromptRouter<HttpServer<SM>>>,
+    usage_tracker: Option<UsageTracker>,
+    tool_history: Option<Arc<ToolHistory>>,
+    config_manager: Option<kodegen_config_manager::ConfigManager>,
+    managers: Option<crate::managers::Managers>,
+    session_manager: Option<Arc<SM>>,
+    connection_cleanup: Option<crate::ConnectionCleanupFn>,
+}
+
+impl<SM> HttpServerBuilder<SM>
+where
+    SM: SessionManager,
+{
+    /// Create a new builder with all fields unset
+    pub fn new() -> Self {
+        Self {
+            server_identity: None,
+            tool_router: None,
+            prompt_router: None,
+            usage_tracker: None,
+            tool_history: None,
+            config_manager: None,
+            managers: None,
+            session_manager: None,
+            connection_cleanup: None,
+        }
+    }
+
+    /// Set server identity (category, instance_id, port)
+    pub fn server_identity(mut self, server_identity: ServerIdentity) -> Self {
+        self.server_identity = Some(server_identity);
+        self
+    }
+
+    /// Set tool router
+    pub fn tool_router(mut self, tool_router: ToolRouter<HttpServer<SM>>) -> Self {
+        self.tool_router = Some(tool_router);
+        self
+    }
+
+    /// Set prompt router
+    pub fn prompt_router(mut self, prompt_router: PromptRouter<HttpServer<SM>>) -> Self {
+        self.prompt_router = Some(prompt_router);
+        self
+    }
+
+    /// Set usage tracker
+    pub fn usage_tracker(mut self, usage_tracker: UsageTracker) -> Self {
+        self.usage_tracker = Some(usage_tracker);
+        self
+    }
+
+    /// Set tool history tracker
+    pub fn tool_history(mut self, tool_history: Arc<ToolHistory>) -> Self {
+        self.tool_history = Some(tool_history);
+        self
+    }
+
+    /// Set config manager
+    pub fn config_manager(mut self, config_manager: kodegen_config_manager::ConfigManager) -> Self {
+        self.config_manager = Some(config_manager);
+        self
+    }
+
+    /// Set managers
+    pub fn managers(mut self, managers: crate::managers::Managers) -> Self {
+        self.managers = Some(managers);
+        self
+    }
+
+    /// Set session manager
+    pub fn session_manager(mut self, session_manager: Arc<SM>) -> Self {
+        self.session_manager = Some(session_manager);
+        self
+    }
+
+    /// Set optional connection cleanup handler
+    pub fn connection_cleanup(mut self, connection_cleanup: crate::ConnectionCleanupFn) -> Self {
+        self.connection_cleanup = Some(connection_cleanup);
+        self
+    }
+
+    /// Build the HttpServer, validating that all required fields are set
+    ///
+    /// Returns Err if any required field is missing.
+    pub fn build(self) -> Result<HttpServer<SM>, String> {
+        Ok(HttpServer {
+            server_identity: self.server_identity.ok_or("server_identity is required")?,
+            tool_router: self.tool_router.ok_or("tool_router is required")?,
+            prompt_router: self.prompt_router.ok_or("prompt_router is required")?,
+            usage_tracker: self.usage_tracker.ok_or("usage_tracker is required")?,
+            tool_history: self.tool_history.ok_or("tool_history is required")?,
+            config_manager: self.config_manager.ok_or("config_manager is required")?,
+            managers: std::sync::Arc::new(self.managers.ok_or("managers is required")?),
+            active_requests: Arc::new(AtomicUsize::new(0)),
+            requests_processed: Arc::new(AtomicU64::new(0)),
+            session_manager: self.session_manager.ok_or("session_manager is required")?,
+            connection_cleanup: self.connection_cleanup,
+        })
+    }
+}
+
+impl<SM> Default for HttpServerBuilder<SM>
+where
+    SM: SessionManager,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// MCP Server that serves tools via Streamable HTTP transport
 ///
 /// Generic over `SessionManager` trait to enable pluggable session backends.
@@ -117,9 +266,11 @@ pub struct HttpServer<SM = LocalSessionManager>
 where
     SM: SessionManager,
 {
+    server_identity: ServerIdentity,
     tool_router: ToolRouter<Self>,
     prompt_router: PromptRouter<Self>,
     usage_tracker: UsageTracker,
+    tool_history: Arc<ToolHistory>,
     config_manager: kodegen_config_manager::ConfigManager,
     managers: std::sync::Arc<crate::managers::Managers>,
     active_requests: Arc<AtomicUsize>,
@@ -136,9 +287,11 @@ where
 {
     fn clone(&self) -> Self {
         Self {
+            server_identity: self.server_identity.clone(),
             tool_router: self.tool_router.clone(),
             prompt_router: self.prompt_router.clone(),
             usage_tracker: self.usage_tracker.clone(),
+            tool_history: self.tool_history.clone(),
             config_manager: self.config_manager.clone(),
             managers: self.managers.clone(),
             active_requests: self.active_requests.clone(),
@@ -153,27 +306,60 @@ impl<SM> HttpServer<SM>
 where
     SM: SessionManager,
 {
+    /// Create a new builder for constructing HttpServer
+    ///
+    /// Use this for clean, type-safe construction with explicit field names.
+    ///
+    /// # Example
+    /// ```rust,ignore
+    /// let server = HttpServer::builder()
+    ///     .server_identity(server_identity)
+    ///     .tool_router(tool_router)
+    ///     .prompt_router(prompt_router)
+    ///     .usage_tracker(usage_tracker)
+    ///     .tool_history(tool_history)
+    ///     .config_manager(config_manager)
+    ///     .managers(managers)
+    ///     .session_manager(session_manager)
+    ///     .connection_cleanup(cleanup_fn)
+    ///     .build()
+    ///     .expect("All required fields provided");
+    /// ```
+    pub fn builder() -> HttpServerBuilder<SM> {
+        HttpServerBuilder::new()
+    }
+
     /// Create a new HTTP server with pre-built routers and managers
+    ///
+    /// This constructor uses the builder pattern internally for backward compatibility.
+    /// For new code, prefer using `HttpServer::builder()` for better clarity.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
+        server_identity: ServerIdentity,
         tool_router: ToolRouter<Self>,
         prompt_router: PromptRouter<Self>,
         usage_tracker: UsageTracker,
+        tool_history: Arc<ToolHistory>,
         config_manager: kodegen_config_manager::ConfigManager,
         managers: crate::managers::Managers,
         session_manager: Arc<SM>,
         connection_cleanup: Option<crate::ConnectionCleanupFn>,
     ) -> Self {
-        Self {
-            tool_router,
-            prompt_router,
-            usage_tracker,
-            config_manager,
-            managers: std::sync::Arc::new(managers),
-            active_requests: Arc::new(AtomicUsize::new(0)),
-            requests_processed: Arc::new(AtomicU64::new(0)),
-            session_manager,
-            connection_cleanup,
+        let mut builder = Self::builder()
+            .server_identity(server_identity)
+            .tool_router(tool_router)
+            .prompt_router(prompt_router)
+            .usage_tracker(usage_tracker)
+            .tool_history(tool_history)
+            .config_manager(config_manager)
+            .managers(managers)
+            .session_manager(session_manager);
+
+        if let Some(cleanup) = connection_cleanup {
+            builder = builder.connection_cleanup(cleanup);
         }
+
+        builder.build().expect("All required fields provided")
     }
 
     /// Handle health check requests
@@ -205,20 +391,77 @@ where
         let start = Instant::now();
         
         log::info!("DELETE /mcp/connection/{}", connection_id);
-        
+
+        // Remove connection-specific usage stats
+        self.usage_tracker.remove_connection(&connection_id);
+
+        // Remove connection-specific tool history
+        self.tool_history.remove_connection(&connection_id);
+
         // Invoke cleanup handler if registered
         if let Some(cleanup) = &self.connection_cleanup {
             cleanup(connection_id.clone()).await;
         } else {
             log::debug!("No cleanup handler registered for this server");
         }
-        
+
         let elapsed = start.elapsed();
         log::info!(
             "Connection {} cleanup completed in {:?}",
             connection_id,
             elapsed
         );
+    }
+
+    /// Handle statistics endpoint requests
+    async fn handle_stats(
+        &self,
+        connection_id: String,
+    ) -> Result<Json<StatsResponse>, (axum::http::StatusCode, String)> {
+        use chrono::Utc;
+
+        // Get stats for this specific connection
+        let stats = self
+            .usage_tracker
+            .get_stats_for_connection(&connection_id)
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("No stats found for connection_id: {}", connection_id),
+                )
+            })?;
+
+        Ok(Json(StatsResponse {
+            category: self.server_identity.category.clone(),
+            connection_id,
+            stats,
+            timestamp: Utc::now().to_rfc3339(),
+        }))
+    }
+
+    /// Handle history endpoint requests
+    async fn handle_history(
+        &self,
+        connection_id: String,
+    ) -> Result<Json<HistoryResponse>, (axum::http::StatusCode, String)> {
+        use chrono::Utc;
+
+        // Get history for this specific connection
+        let history = self.tool_history
+            .get_history_for_connection(&connection_id)
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("No history found for connection_id: {}", connection_id),
+                )
+            })?;
+
+        Ok(Json(HistoryResponse {
+            category: self.server_identity.category.clone(),
+            connection_id,
+            history,
+            timestamp: Utc::now().to_rfc3339(),
+        }))
     }
 
     /// Create and serve HTTP server with optional TLS configuration
@@ -340,6 +583,38 @@ where
             }
         };
 
+        // Create stats handler closure
+        let stats_handler = {
+            let server = self.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let server = server.clone();
+                async move {
+                    let connection_id = params.get("connection_id")
+                        .ok_or_else(|| (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Missing required parameter: connection_id".to_string(),
+                        ))?;
+                    server.handle_stats(connection_id.clone()).await
+                }
+            }
+        };
+
+        // Create history handler closure
+        let history_handler = {
+            let server = self.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let server = server.clone();
+                async move {
+                    let connection_id = params.get("connection_id")
+                        .ok_or_else(|| (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Missing required parameter: connection_id".to_string(),
+                        ))?;
+                    server.handle_history(connection_id.clone()).await
+                }
+            }
+        };
+
         // Create connection delete handler closure
         let connection_delete_handler = {
             let server = self.clone();
@@ -355,6 +630,8 @@ where
         // Build Axum router with CORS
         let router = Router::new()
             .route("/mcp/health", get(health_handler))
+            .route("/mcp/stats", get(stats_handler))
+            .route("/mcp/history", get(history_handler))
             .route("/mcp/connection/{connection_id}", delete(connection_delete_handler))
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
@@ -677,6 +954,38 @@ where
             }
         };
 
+        // Create stats handler closure
+        let stats_handler = {
+            let server = self.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let server = server.clone();
+                async move {
+                    let connection_id = params.get("connection_id")
+                        .ok_or_else(|| (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Missing required parameter: connection_id".to_string(),
+                        ))?;
+                    server.handle_stats(connection_id.clone()).await
+                }
+            }
+        };
+
+        // Create history handler closure
+        let history_handler = {
+            let server = self.clone();
+            move |axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| {
+                let server = server.clone();
+                async move {
+                    let connection_id = params.get("connection_id")
+                        .ok_or_else(|| (
+                            axum::http::StatusCode::BAD_REQUEST,
+                            "Missing required parameter: connection_id".to_string(),
+                        ))?;
+                    server.handle_history(connection_id.clone()).await
+                }
+            }
+        };
+
         // Create connection delete handler closure
         let connection_delete_handler = {
             let server = self.clone();
@@ -692,6 +1001,8 @@ where
         // Build Axum router with CORS
         let router = Router::new()
             .route("/mcp/health", get(health_handler))
+            .route("/mcp/stats", get(stats_handler))
+            .route("/mcp/history", get(history_handler))
             .route("/mcp/connection/{connection_id}", delete(connection_delete_handler))
             .nest_service("/mcp", http_service)
             .layer(CorsLayer::permissive());
@@ -873,21 +1184,59 @@ where
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let tool_name = request.name.clone();
+        let args_value = serde_json::Value::Object(request.arguments.clone().unwrap_or_default());
+
+        // Extract connection_id from HTTP headers (if present)
+        let connection_id: Option<String> = context
+            .meta
+            .0
+            .get("headers")
+            .and_then(|v| v.as_object())
+            .and_then(|headers| headers.get(kodegen_config::X_KODEGEN_CONNECTION_ID))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Increment total tool calls counter
         self.requests_processed.fetch_add(1, Ordering::SeqCst);
 
         // Track this request handler (guard ensures decrement even on panic)
         let _guard = RequestGuard::new(self.active_requests.clone());
-        
+
+        // Measure tool execution time
+        let start = std::time::Instant::now();
+
         let tcc = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
 
         let result = self.tool_router.call(tcc).await;
 
-        if result.is_ok() {
-            self.usage_tracker.track_success(&tool_name);
-        } else {
-            self.usage_tracker.track_failure(&tool_name);
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        // Track in tool history (only if connection_id is present)
+        if let Some(ref conn_id) = connection_id {
+            // Serialize result to JSON
+            let output_value = match &result {
+                Ok(call_result) => serde_json::to_value(call_result).unwrap_or(serde_json::Value::Null),
+                Err(err) => serde_json::json!({
+                    "error": err.to_string(),
+                }),
+            };
+
+            self.tool_history.track_call(
+                conn_id,
+                tool_name.to_string(),
+                args_value.clone(),
+                output_value,
+                Some(duration_ms),
+            );
+        }
+
+        // Track success/failure per-connection (only if connection_id is present)
+        if let Some(conn_id) = connection_id {
+            if result.is_ok() {
+                self.usage_tracker.track_success(&conn_id, &tool_name);
+            } else {
+                self.usage_tracker.track_failure(&conn_id, &tool_name);
+            }
         }
 
         result

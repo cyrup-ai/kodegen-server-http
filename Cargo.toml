@@ -1,6 +1,6 @@
 [package]
 name = "kodegen_server_http"
-version = "0.8.0"
+version = "0.10.0"
 edition = "2024"
 description = "KODEGEN.ᴀɪ: Database query and schema exploration MCP tools for AI agents."
 license = "Apache-2.0 OR MIT"
@@ -18,12 +18,17 @@ keywords = [
 
 [dependencies]
 # Internal dependencies
-kodegen_config_manager = { version = "0.8" }
-kodegen_utils = { version = "0.8" }
-kodegen_mcp_schema = { version = "0.8" }
+kodegen_config_manager = { version = "0.10" }
+kodegen_mcp_schema = { version = "0.10" }
+kodegen_config = { version = "0.10" }
 
 # Cross-platform process memory tracking
 sysinfo = "0.37"
+
+# Usage tracking dependencies
+parking_lot = "0.12.5"
+inventory = "0.3"
+dashmap = "6"
 
 # MCP SDK with Streamable HTTP feature (NOT sse-server!)
 rmcp = { version = "0.10", features = ["server", "transport-streamable-http-server"] }
@@ -52,6 +57,7 @@ thiserror = "2"
 env_logger = "0.11"
 log = "0.4"
 chrono = "0.4"
+termcolor = "1"
 
 # TLS
 rustls = { version = "0.23", features = ["ring"] }

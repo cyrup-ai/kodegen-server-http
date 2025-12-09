@@ -118,8 +118,8 @@ impl ServerBuilder {
     /// Set the category name for this server (required)
     ///
     /// Use canonical constants from `kodegen_config::CATEGORY_*`
-    pub fn category(mut self, category: &str) -> Self {
-        self.category = Some(category.to_string());
+    pub fn category(mut self, category: &'static kodegen_config::Category) -> Self {
+        self.category = Some(category.name.to_string());
         self
     }
 

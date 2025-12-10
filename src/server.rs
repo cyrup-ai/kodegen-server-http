@@ -1,7 +1,7 @@
 use anyhow::Result;
 use crate::usage_tracker::{UsageTracker, UsageStats};
 use crate::tool_history::ToolHistory;
-use kodegen_mcp_schema::tool::tool_history::ToolCallRecord;
+use kodegen_mcp_schema::tool::{tool_history::ToolCallRecord, ToolStatus, add_branded_line_to_result};
 use thiserror::Error;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -53,64 +53,7 @@ fn build_rustls_config(
     Ok(Arc::new(config))
 }
 
-/// Tool execution status for branded line coloring
-#[derive(Debug, Clone, Copy)]
-enum ToolStatus {
-    Success,
-    Error,
-}
 
-/// Prepend branded display line to Content[0]
-fn prepend_branded_line<S>(
-    contents: &mut [Content],
-    tool_name: &str,
-    duration_ms: u64,
-    status: ToolStatus,
-    tool_router: &ToolRouter<S>,
-) where
-    S: Send + Sync + 'static,
-{
-    // Get icon from tool metadata
-    let icon = tool_router
-        .list_all()
-        .into_iter()
-        .find(|tool| tool.name == tool_name)
-        .and_then(|tool| {
-            tool.meta.as_ref()
-                .and_then(|meta| meta.0.get("icon"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .and_then(|s| s.chars().next())
-        .unwrap_or('◆');  // Fallback icon
-
-    // Calculate duration in seconds (ceil to >= 1s)
-    let duration_s = ((duration_ms as f64 / 1000.0).ceil() as u64).max(1);
-
-    // Select timing color based on status
-    // Success: green (35 #00af5f)
-    // Error: red (204 #ff5f87)
-    let timing_color = match status {
-        ToolStatus::Success => 35,
-        ToolStatus::Error => 204,
-    };
-
-    // Format branded line with ANSI colors
-    // ⓚ brand symbol: color 132 (#af5f87)
-    // icon + tool_name: color 32 (#0087d7)
-    // duration: status-based color
-    let branded_line = format!(
-        "\x1b[38;5;132mⓚ\x1b[0m   \x1b[38;5;32m{} {}\x1b[0m   \x1b[38;5;{}m{}s\x1b[0m",
-        icon, tool_name, timing_color, duration_s
-    );
-
-    // Prepend to Content[0]
-    if let Some(content) = contents.get_mut(0)
-        && let RawContent::Text(ref mut raw_text) = content.raw
-    {
-        raw_text.text = format!("{}\n\n{}", branded_line, raw_text.text);
-    }
-}
 
 /// Health check response returned by /mcp/health endpoint
 #[derive(Serialize)]
@@ -1210,32 +1153,52 @@ where
 
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        // Prepend branded display line to Content[0] with status-based coloring
+        // Get icon from tool metadata
+        let icon = self.tool_router
+            .list_all()
+            .into_iter()
+            .find(|tool| tool.name == tool_name)
+            .and_then(|tool| {
+                tool.meta.as_ref()
+                    .and_then(|meta| meta.0.get("icon"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .and_then(|s| s.chars().next())
+            .unwrap_or('◆');  // Fallback icon
+
+        // Add branded display line as new Content[0] with status-based coloring
         match result {
             Ok(ref mut call_result) => {
-                prepend_branded_line(
-                    &mut call_result.content,
+                add_branded_line_to_result(
+                    call_result,
                     &tool_name,
+                    icon,
                     duration_ms,
                     ToolStatus::Success,
-                    &self.tool_router,
                 );
             }
             Err(ref mut error) => {
-                // For errors, create a synthetic content if needed
-                // MCP errors may not have content, so we need to ensure there's something to prepend to
+                // For errors, add branded line if content exists
                 if let Some(ref mut data) = error.data
                     && let Some(contents_value) = data.get_mut("content")
-                    && let Ok(mut contents) = serde_json::from_value::<Vec<Content>>(contents_value.clone())
+                    && let Ok(contents) = serde_json::from_value::<Vec<Content>>(contents_value.clone())
                 {
-                    prepend_branded_line(
-                        &mut contents,
+                    // Create a temporary CallToolResult to use add_branded_line_to_result
+                    let mut temp_result = CallToolResult {
+                        content: contents,
+                        structured_content: None,
+                        is_error: None,
+                        meta: None,
+                    };
+                    add_branded_line_to_result(
+                        &mut temp_result,
                         &tool_name,
+                        icon,
                         duration_ms,
                         ToolStatus::Error,
-                        &self.tool_router,
                     );
-                    *contents_value = serde_json::to_value(&contents).unwrap_or(contents_value.clone());
+                    *contents_value = serde_json::to_value(&temp_result.content).unwrap_or(contents_value.clone());
                 }
             }
         }

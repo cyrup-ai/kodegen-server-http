@@ -8,19 +8,14 @@ use rmcp::{
     handler::server::router::{prompt::PromptRouter, tool::ToolRouter},
     model::*,
     service::RequestContext,
-    transport::{
-        common::server_side_http::SessionId,
-        streamable_http_server::{
-            SessionManager,
-            StreamableHttpService, StreamableHttpServerConfig,
-            session::local::LocalSessionManager,
-        },
+    transport::streamable_http_server::{
+        SessionManager,
+        StreamableHttpService, StreamableHttpServerConfig,
+        session::local::LocalSessionManager,
     },
 };
-use std::future::Future;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -33,41 +28,6 @@ use tokio_rustls::{
     rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
     TlsAcceptor,
 };
-
-/// Wrapper for LocalSessionManager to enable graceful shutdown
-/// 
-/// Implements ShutdownHook to close all active HTTP sessions during server shutdown.
-/// Each session runs a background tokio task that must be explicitly closed.
-struct LocalSessionManagerHook {
-    session_manager: Arc<LocalSessionManager>,
-}
-
-impl crate::managers::ShutdownHook for LocalSessionManagerHook {
-    fn shutdown(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-        Box::pin(async move {
-            log::info!("Shutting down LocalSessionManager");
-            
-            // Get all active session IDs (sessions field is public)
-            let session_ids: Vec<SessionId> = {
-                let sessions = self.session_manager.sessions.read().await;
-                sessions.keys().cloned().collect()
-            };
-            
-            log::debug!("Closing {} active HTTP sessions", session_ids.len());
-            
-            // Close each session gracefully (sends SessionEvent::Close to worker)
-            for session_id in session_ids {
-                match self.session_manager.close_session(&session_id).await {
-                    Ok(_) => log::trace!("Closed session: {}", session_id),
-                    Err(e) => log::warn!("Failed to close session {}: {}", session_id, e),
-                }
-            }
-            
-            log::info!("LocalSessionManager shutdown complete");
-            Ok(())
-        })
-    }
-}
 
 /// Build rustls ServerConfig from PEM files
 fn build_rustls_config(
@@ -595,21 +555,8 @@ where
         let (completion_tx, completion_rx) = oneshot::channel();
         let ct = CancellationToken::new();
 
-        // Register session manager for graceful shutdown (LocalSessionManager only)
-        // Uses type downcast to check if session_manager is LocalSessionManager
-        // Other SessionManager implementations would handle shutdown differently
+        // Session shutdown is handled by rmcp via cancellation_token in StreamableHttpServerConfig
         let session_manager = self.session_manager.clone();
-        let session_manager_any: &dyn std::any::Any = &*session_manager;
-        if session_manager_any.downcast_ref::<LocalSessionManager>().is_some() {
-            // SAFETY: We just confirmed that SM is LocalSessionManager via downcast_ref.
-            // Therefore Arc<SM> and Arc<LocalSessionManager> are the same type at runtime.
-            let local_sm: Arc<LocalSessionManager> = unsafe {
-                std::mem::transmute(session_manager.clone())
-            };
-            managers.register(LocalSessionManagerHook {
-                session_manager: local_sm,
-            }).await;
-        }
 
         // Spawn background memory monitor
         crate::monitor::spawn_memory_monitor(
@@ -630,6 +577,7 @@ where
             StreamableHttpServerConfig {
                 stateful_mode: true,
                 sse_keep_alive: Some(Duration::from_secs(15)),
+                cancellation_token: ct.clone(),
             },
         );
 
@@ -970,17 +918,8 @@ where
         let (completion_tx, completion_rx) = oneshot::channel();
         let ct = CancellationToken::new();
 
-        // Register session manager for graceful shutdown (LocalSessionManager only)
+        // Session shutdown is handled by rmcp via cancellation_token in StreamableHttpServerConfig
         let session_manager = self.session_manager.clone();
-        let session_manager_any: &dyn std::any::Any = &*session_manager;
-        if session_manager_any.downcast_ref::<LocalSessionManager>().is_some() {
-            let local_sm: Arc<LocalSessionManager> = unsafe {
-                std::mem::transmute(session_manager.clone())
-            };
-            managers.register(LocalSessionManagerHook {
-                session_manager: local_sm,
-            }).await;
-        }
 
         // Spawn background memory monitor
         crate::monitor::spawn_memory_monitor(
@@ -1001,6 +940,7 @@ where
             StreamableHttpServerConfig {
                 stateful_mode: true,
                 sse_keep_alive: Some(Duration::from_secs(15)),
+                cancellation_token: ct.clone(),
             },
         );
 
@@ -1371,6 +1311,7 @@ where
         Ok(ListResourcesResult {
             resources: vec![],
             next_cursor: None,
+            meta: None,
         })
     }
 
@@ -1393,6 +1334,7 @@ where
         Ok(ListResourceTemplatesResult {
             next_cursor: None,
             resource_templates: Vec::new(),
+            meta: None,
         })
     }
 

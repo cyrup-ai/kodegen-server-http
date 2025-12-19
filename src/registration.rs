@@ -2,8 +2,7 @@ use kodegen_mcp_schema::Tool;
 use rmcp::handler::server::router::{prompt::PromptRouter, tool::ToolRouter};
 use std::sync::Arc;
 
-// Import log for tool registration logging
-use log;
+use log::info;
 
 /// Register a single tool with both routers
 ///
@@ -60,13 +59,13 @@ where
 {
     let tool_name = T::name();
     
-    log::info!("Registering tool: {}", tool_name);
+    info!("Registering tool: {}", tool_name);
     
     let tool = Arc::new(tool);
     let tool_router = tool_router.with_route(tool.clone().arc_into_tool_route());
     let prompt_router = prompt_router.with_route(tool.arc_into_prompt_route());
     
-    log::info!("✓ Successfully registered tool: {}", tool_name);
+    info!("✓ Successfully registered tool: {}", tool_name);
     
     (tool_router, prompt_router)
 }
@@ -128,12 +127,12 @@ where
 {
     let tool_name = T::name();
     
-    log::info!("Registering tool (Arc): {}", tool_name);
+    info!("Registering tool (Arc): {}", tool_name);
     
     let tool_router = tool_router.with_route(tool.clone().arc_into_tool_route());
     let prompt_router = prompt_router.with_route(tool.arc_into_prompt_route());
     
-    log::info!("✓ Successfully registered tool (Arc): {}", tool_name);
+    info!("✓ Successfully registered tool (Arc): {}", tool_name);
     
     (tool_router, prompt_router)
 }
